@@ -1,0 +1,91 @@
+.ui-panel {
+  position: fixed;
+  top: 10%;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: row;
+  background: #181a20ee;
+  border-radius: 16px;
+  box-shadow: 0 4px 32px #000a;
+  padding: 32px 24px;
+  z-index: 1000;
+  gap: 32px;
+  font-family: 'Segoe UI', Arial, sans-serif;
+}
+.ui-stats, .ui-equipment, .ui-inventory {
+  background: #23242b;
+  border-radius: 12px;
+  padding: 16px 12px;
+  min-width: 140px;
+  color: #e0e0e0;
+  box-shadow: 0 2px 8px #0004;
+}
+.ui-stats h3, .ui-equipment h3, .ui-inventory h3 {
+  margin-top: 0;
+  margin-bottom: 12px;
+  font-size: 1.1em;
+  color: #7ecfff;
+  letter-spacing: 1px;
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 1em;
+}
+.equip-slot {
+  background: #181a20;
+  border: 1px solid #444;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  padding: 8px 0;
+  text-align: center;
+  min-height: 40px;
+  color: #b0b0b0;
+  font-size: 0.95em;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.equip-slot:hover {
+  background: #22242a;
+}
+.inv-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 36px);
+  grid-template-rows: repeat(4, 36px);
+  gap: 6px;
+}
+.inv-slot {
+  background: #181a20;
+  border: 1px solid #444;
+  border-radius: 6px;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #b0b0b0;
+  font-size: 0.9em;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.inv-slot:hover {
+  background: #22242a;
+}
+.ui-tooltip {
+  position: fixed;
+  pointer-events: none;
+  background: #23242b;
+  color: #e0e0e0;
+  border: 1px solid #7ecfff;
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 1em;
+  z-index: 2000;
+  box-shadow: 0 2px 12px #000a;
+  min-width: 160px;
+  max-width: 320px;
+  opacity: 0.97;
+  transition: opacity 0.1s;
+} 
