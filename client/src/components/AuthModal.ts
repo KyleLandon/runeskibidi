@@ -1,4 +1,5 @@
 import './AuthModal.css';
+import { AssetManager } from '../managers/AssetManager';
 
 export class AuthModal {
   el: HTMLDivElement;
@@ -6,9 +7,11 @@ export class AuthModal {
   onAuth: (email: string, password: string, mode: 'login' | 'register') => Promise<void>;
   loading = false;
   error = '';
+  assetManager: AssetManager;
 
   constructor(onAuth: (email: string, password: string, mode: 'login' | 'register') => Promise<void>) {
     this.onAuth = onAuth;
+    this.assetManager = AssetManager.getInstance();
     this.el = document.createElement('div');
     this.el.className = 'auth-modal-overlay';
     this.el.innerHTML = this.render();

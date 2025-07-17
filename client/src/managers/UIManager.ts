@@ -2,6 +2,7 @@ import { Tooltip } from '../ui/Tooltip';
 import { StatsPanel } from '../ui/StatsPanel';
 import { EquipmentPanel } from '../ui/EquipmentPanel';
 import { InventoryPanel } from '../ui/InventoryPanel';
+import { SkillsPanel } from '../ui/SkillsPanel';
 
 export class UIManager {
   panel: HTMLDivElement;
@@ -10,6 +11,7 @@ export class UIManager {
   statsPanel: StatsPanel;
   equipmentPanel: EquipmentPanel;
   inventoryPanel: InventoryPanel;
+  skillsPanel: SkillsPanel;
   player: any;
 
   constructor(player: any) {
@@ -22,11 +24,16 @@ export class UIManager {
     this.statsPanel = new StatsPanel();
     this.equipmentPanel = new EquipmentPanel();
     this.inventoryPanel = new InventoryPanel();
+    this.skillsPanel = new SkillsPanel();
 
     this.panel.appendChild(this.statsPanel.el);
     this.panel.appendChild(this.equipmentPanel.el);
     this.panel.appendChild(this.inventoryPanel.el);
+    this.panel.appendChild(this.skillsPanel.el);
     document.body.appendChild(this.panel);
+    
+    // Initial render
+    this.refreshUI();
   }
 
   show() {
@@ -42,6 +49,14 @@ export class UIManager {
 
   toggle() {
     this.visible ? this.hide() : this.show();
+  }
+
+  refreshUI() {
+    // Update all panels with current player data
+    this.renderStats(this.player.stats);
+    this.renderEquipment(this.player.equipment);
+    this.renderInventory(this.player.inventory);
+    this.skillsPanel.refresh();
   }
 
   renderStats(stats: { name: string; value: number }[]) {
