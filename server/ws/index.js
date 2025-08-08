@@ -3,6 +3,50 @@ const WebSocket = require('ws');
 const os = require('os');
 const { createClient } = require('@supabase/supabase-js');
 
+// module-level state for metrics export
+const wsState = {
+  wss: null,
+  clientsRef: null,
+  perIpCounts: new Map(),
+  stats: {
+    messagesIn: 0,
+    messagesDroppedBurst: 0,
+    messagesDroppedRate: 0,
+    sent: 0,
+    slowConsumerClosed: 0,
+    connectionsDeniedPerIp: 0,
+  },
+  maxPerIp: 0,
+};
+
+function getClientIp(req) {
+  const xfwd = req.headers['x-forwarded-for'];
+  const first = (Array.isArray(xfwd) ? xfwd[0] : xfwd)?.split(',')[0]?.trim();
+  const ip = first || req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+  // Normalize IPv6-mapped IPv4
+  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+}
+
+function getWebSocketStats() {
+  const wss = wsState.wss;
+  const clients = wsState.clientsRef;
+  const perIpCounts = wsState.perIpCounts;
+  const totalBuffered = wss ? Array.from(wss.clients).reduce((s, ws) => s + (ws.bufferedAmount || 0), 0) : 0;
+  // Top 10 IPs by connection count
+  const topIps = Array.from(perIpCounts.entries())
+    .sort((a,b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([ip, count]) => ({ ip, count }));
+  return {
+    clientCount: wss ? wss.clients.size : 0,
+    trackedClients: clients ? clients.size : 0,
+    totalBufferedBytes: totalBuffered,
+    perIpTop: topIps,
+    maxConnectionsPerIp: wsState.maxPerIp,
+    counters: { ...wsState.stats },
+  };
+}
+
 function setupWebSocketServer(server, world, options = {}) {
   const wss = new WebSocket.Server({ server, perMessageDeflate: {
     zlibDeflateOptions: { level: 3 },
@@ -19,6 +63,11 @@ function setupWebSocketServer(server, world, options = {}) {
     : null;
 
   const clients = new Map(); // playerId -> ws
+  const perIpCounts = wsState.perIpCounts; // shared map
+  const maxConnectionsPerIp = Number(process.env.MAX_CONNECTIONS_PER_IP || options.maxConnectionsPerIp || 5);
+  wsState.wss = wss;
+  wsState.clientsRef = clients;
+  wsState.maxPerIp = maxConnectionsPerIp;
 
   // Validate auth header if required
   async function validateAuth(req) {
@@ -37,10 +86,36 @@ function setupWebSocketServer(server, world, options = {}) {
     }
   }
 
+  // Backpressure-safe send
+  function safeSend(ws, str) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    // Drop if socket is too backed up (slow consumer protection)
+    if (ws.bufferedAmount > 2_000_000) { // ~2MB
+      wsState.stats.slowConsumerClosed++;
+      try { ws.close(1001, 'slow_consumer'); } catch {}
+      return false;
+    }
+    try { ws.send(str); wsState.stats.sent++; return true; } catch { return false; }
+  }
+
   wss.on('connection', async (ws, req) => {
+    // Per-IP cap
+    const ip = getClientIp(req);
+    const cur = perIpCounts.get(ip) || 0;
+    if (cur >= maxConnectionsPerIp) {
+      wsState.stats.connectionsDeniedPerIp++;
+      try { ws.close(1008, 'too_many_connections'); } catch {}
+      return;
+    }
+    perIpCounts.set(ip, cur + 1);
+    ws._ip = ip;
+
     const auth = await validateAuth(req);
     if (!auth.ok) {
       ws.close(4401, 'unauthorized');
+      // decrement the per-ip we incremented above
+      const left = (perIpCounts.get(ip) || 1) - 1;
+      if (left <= 0) perIpCounts.delete(ip); else perIpCounts.set(ip, left);
       return;
     }
     const playerId = auth.playerId || req.headers['x-player-id'] || `guest:${Math.random().toString(36).slice(2,8)}`;
@@ -49,10 +124,16 @@ function setupWebSocketServer(server, world, options = {}) {
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
 
+    // Per-connection state
+    ws._rlLastSec = Math.floor(Date.now() / 1000);
+    ws._rlCount = 0;
+    ws._rlBurst = 40;      // allow bursts
+    ws._rlPerSec = 20;     // sustained inputs/sec
+
     clients.set(playerId, ws);
     // Add to world on connect
     world.addPlayer(playerId);
-    ws.send(JSON.stringify({ type: 'welcome', playerId, snapshot: world.getSnapshotFor(playerId) }));
+    safeSend(ws, JSON.stringify({ type: 'welcome', playerId, snapshot: world.getSnapshotFor(playerId) }));
     world.broadcastExcept(playerId, { type: 'player_joined', playerId });
 
     // Notify admin tracking if provided
@@ -60,25 +141,22 @@ function setupWebSocketServer(server, world, options = {}) {
       try { options.onPlayerConnect({ playerId, sessionId, timestamp: Date.now() }); } catch {}
     }
 
-    // Per-connection simple rate limit (inputs/sec)
-    let lastSecond = Math.floor(Date.now() / 1000);
-    let counter = 0;
-
     ws.on('message', (msg) => {
+      wsState.stats.messagesIn++;
       let data;
       try { data = JSON.parse(msg.toString()); } catch { return; }
       if (!data || typeof data !== 'object') return;
 
+      // Token bucket style rate limit
       const nowSec = Math.floor(Date.now() / 1000);
-      if (nowSec !== lastSecond) { lastSecond = nowSec; counter = 0; }
-      counter++;
-      if (counter > 30) { // basic global input cap per client
-        return; // drop silently
-      }
+      if (nowSec !== ws._rlLastSec) { ws._rlLastSec = nowSec; ws._rlCount = 0; }
+      ws._rlCount++;
+      if (ws._rlCount > ws._rlBurst) { wsState.stats.messagesDroppedBurst++; return; }
+      if (ws._rlCount > ws._rlPerSec) { wsState.stats.messagesDroppedRate++; return; }
 
       switch (data.type) {
         case 'ping': {
-          ws.send(JSON.stringify({ type: 'pong', clientT: data.t, serverT: Date.now() }));
+          safeSend(ws, JSON.stringify({ type: 'pong', clientT: data.t, serverT: Date.now() }));
           return;
         }
         case 'move': {
@@ -90,7 +168,8 @@ function setupWebSocketServer(server, world, options = {}) {
           return;
         }
         case 'chat': {
-          world.broadcast({ type: 'chat', from: playerId, text: String(data.text || '').slice(0,256), t: Date.now() });
+          // Route through world for interest-based broadcast
+          world.queueInput({ playerId, kind: 'chat', payload: { text: String(data.text || '').slice(0,256) } });
           return;
         }
         case 'equip': {
@@ -115,6 +194,12 @@ function setupWebSocketServer(server, world, options = {}) {
       if (typeof options.onPlayerDisconnect === 'function') {
         try { options.onPlayerDisconnect({ playerId, sessionId, timestamp: Date.now() }); } catch {}
       }
+      // decrement per-IP count
+      const ipKey = ws._ip;
+      if (ipKey) {
+        const left = (perIpCounts.get(ipKey) || 1) - 1;
+        if (left <= 0) perIpCounts.delete(ipKey); else perIpCounts.set(ipKey, left);
+      }
     });
   });
 
@@ -123,7 +208,7 @@ function setupWebSocketServer(server, world, options = {}) {
     wss.clients.forEach((ws) => {
       if (ws.isAlive === false) return ws.terminate();
       ws.isAlive = false;
-      ws.ping();
+      try { ws.ping(); } catch {}
     });
   }, 30000);
 
@@ -133,13 +218,14 @@ function setupWebSocketServer(server, world, options = {}) {
   world.onSend((playerId, msg) => {
     const ws = clients.get(playerId);
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    try { ws.send(JSON.stringify(msg)); } catch { /* ignore */ }
+    const str = JSON.stringify(msg);
+    safeSend(ws, str);
   });
 
   world.onBroadcast((msg) => {
     const str = JSON.stringify(msg);
     for (const ws of wss.clients) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(str);
+      if (ws.readyState === WebSocket.OPEN) safeSend(ws, str);
     }
   });
 
@@ -147,11 +233,19 @@ function setupWebSocketServer(server, world, options = {}) {
     const str = JSON.stringify(msg);
     for (const [pid, ws] of clients.entries()) {
       if (pid === excludeId) continue;
-      if (ws.readyState === WebSocket.OPEN) ws.send(str);
+      if (ws.readyState === WebSocket.OPEN) safeSend(ws, str);
+    }
+  });
+
+  world.onMulticast((playerIds, msg) => {
+    const str = JSON.stringify(msg);
+    for (const pid of playerIds) {
+      const ws = clients.get(pid);
+      if (ws && ws.readyState === WebSocket.OPEN) safeSend(ws, str);
     }
   });
 
   return wss;
 }
 
-module.exports = { setupWebSocketServer };
+module.exports = { setupWebSocketServer, getWebSocketStats };

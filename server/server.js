@@ -9,7 +9,7 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 const PORT = process.env.PORT || 4000;
 const http = require('http');
-const { setupWebSocketServer } = require('./ws');
+const { setupWebSocketServer, getWebSocketStats } = require('./ws');
 const { World } = require('./simulation/world');
 const { upsertPresence, savePosition } = require('./db/playerRepo');
 
@@ -94,6 +94,72 @@ app.delete('/api/logs', (req, res) => {
 app.delete('/api/players', (req, res) => {
   activePlayers.clear();
   res.json({ status: 'ok' });
+});
+
+// Stats endpoint (JSON)
+app.get('/api/stats', (req, res) => {
+  const mem = process.memoryUsage();
+  const ws = getWebSocketStats();
+  const worldMetrics = world.getMetrics();
+  res.json({
+    uptimeSec: Math.round(process.uptime()),
+    node: process.version,
+    memory: {
+      rss: mem.rss,
+      heapUsed: mem.heapUsed,
+      heapTotal: mem.heapTotal,
+      external: mem.external,
+    },
+    ws,
+    world: worldMetrics,
+    activePlayers: activePlayers.size,
+  });
+});
+
+// Prometheus metrics
+app.get('/metrics', (req, res) => {
+  const mem = process.memoryUsage();
+  const ws = getWebSocketStats();
+  const worldMetrics = world.getMetrics();
+  const lines = [];
+  lines.push(`# HELP runeskibidi_ws_clients Number of active WebSocket clients`);
+  lines.push(`# TYPE runeskibidi_ws_clients gauge`);
+  lines.push(`runeskibidi_ws_clients ${ws.clientCount}`);
+  lines.push(`# HELP runeskibidi_active_players Players reported active via admin tracking`);
+  lines.push(`# TYPE runeskibidi_active_players gauge`);
+  lines.push(`runeskibidi_active_players ${activePlayers.size}`);
+  lines.push(`# HELP runeskibidi_world_players Players in world authoritative state`);
+  lines.push(`# TYPE runeskibidi_world_players gauge`);
+  lines.push(`runeskibidi_world_players ${worldMetrics.players}`);
+  lines.push(`# HELP runeskibidi_world_tick_avg_ms Average tick execution time`);
+  lines.push(`# TYPE runeskibidi_world_tick_avg_ms gauge`);
+  lines.push(`runeskibidi_world_tick_avg_ms ${worldMetrics.avgTickMs.toFixed(3)}`);
+  lines.push(`# HELP runeskibidi_world_tick_last_ms Last tick execution time`);
+  lines.push(`# TYPE runeskibidi_world_tick_last_ms gauge`);
+  lines.push(`runeskibidi_world_tick_last_ms ${worldMetrics.lastTickMs}`);
+  lines.push(`# HELP runeskibidi_ws_messages_in_total Total inbound WS messages`);
+  lines.push(`# TYPE runeskibidi_ws_messages_in_total counter`);
+  lines.push(`runeskibidi_ws_messages_in_total ${ws.counters.messagesIn}`);
+  lines.push(`# HELP runeskibidi_ws_messages_dropped_burst_total Dropped due to burst cap`);
+  lines.push(`# TYPE runeskibidi_ws_messages_dropped_burst_total counter`);
+  lines.push(`runeskibidi_ws_messages_dropped_burst_total ${ws.counters.messagesDroppedBurst}`);
+  lines.push(`# HELP runeskibidi_ws_messages_dropped_rate_total Dropped due to sustained rate cap`);
+  lines.push(`# TYPE runeskibidi_ws_messages_dropped_rate_total counter`);
+  lines.push(`runeskibidi_ws_messages_dropped_rate_total ${ws.counters.messagesDroppedRate}`);
+  lines.push(`# HELP runeskibidi_ws_sent_total Total WS messages sent`);
+  lines.push(`# TYPE runeskibidi_ws_sent_total counter`);
+  lines.push(`runeskibidi_ws_sent_total ${ws.counters.sent}`);
+  lines.push(`# HELP runeskibidi_ws_slow_consumer_closed_total Connections closed due to slow consumer`);
+  lines.push(`# TYPE runeskibidi_ws_slow_consumer_closed_total counter`);
+  lines.push(`runeskibidi_ws_slow_consumer_closed_total ${ws.counters.slowConsumerClosed}`);
+  lines.push(`# HELP runeskibidi_ws_total_buffered_bytes Total buffered bytes across all clients`);
+  lines.push(`# TYPE runeskibidi_ws_total_buffered_bytes gauge`);
+  lines.push(`runeskibidi_ws_total_buffered_bytes ${ws.totalBufferedBytes}`);
+  lines.push(`# HELP runeskibidi_process_memory_rss_bytes Resident set size in bytes`);
+  lines.push(`# TYPE runeskibidi_process_memory_rss_bytes gauge`);
+  lines.push(`runeskibidi_process_memory_rss_bytes ${mem.rss}`);
+  res.set('Content-Type', 'text/plain; version=0.0.4');
+  res.send(lines.join('\n'));
 });
 
 // Admin panel: view connections and logs
@@ -458,7 +524,13 @@ server.on('connection', (socket) => socket.setNoDelay(true));
 server.keepAliveTimeout = 60_000; // 60s
 server.headersTimeout = 65_000; // keepAliveTimeout + buffer
 // Create world simulation and attach to WS
-const world = new World({ tickRate: Number(process.env.TICK_RATE || 20) });
+const world = new World({
+  tickRate: Number(process.env.TICK_RATE || 20),
+  visibilityRadius: Number(process.env.VISIBILITY_RADIUS || 250),
+  zoneSize: Number(process.env.ZONE_SIZE || 1000),
+  shardId: Number(process.env.SHARD_ID || 0),
+  shardCount: Number(process.env.SHARD_COUNT || 1),
+});
 setupWebSocketServer(server, world, {
   requireAuth: process.env.REQUIRE_AUTH === 'true',
   supabaseUrl: process.env.SUPABASE_URL,
@@ -492,3 +564,22 @@ setInterval(() => {
 server.listen(PORT, () => {
   console.log(`Admin server and WebSocket running on http://localhost:${PORT}/admin`);
 });
+
+// Graceful shutdown
+function shutdown(signal) {
+  try {
+    console.log(`[${new Date().toISOString()}] Received ${signal}. Shutting down...`);
+    world.stop();
+    server.close(() => {
+      console.log('HTTP server closed');
+      process.exit(0);
+    });
+    // Force exit if not closing in time
+    setTimeout(() => process.exit(0), 5000).unref();
+  } catch {
+    process.exit(1);
+  }
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

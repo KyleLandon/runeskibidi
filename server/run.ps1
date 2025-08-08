@@ -1,4 +1,4 @@
-git param(
+param(
   [string]$Port = "4000",
   [string]$TickRate = "20",
   [string]$CorsOrigin = "",
@@ -6,6 +6,11 @@ git param(
   [string]$SupabaseUrl = "",
   [string]$SupabaseServiceRoleKey = "",
   [switch]$RequireAuth,
+  [int]$VisibilityRadius = 250,
+  [int]$ZoneSize = 1000,
+  [int]$ShardId = 0,
+  [int]$ShardCount = 1,
+  [int]$MaxConnectionsPerIp = 5,
   [switch]$NoPause
 )
 
@@ -29,6 +34,11 @@ if ($AdminToken) { $env:ADMIN_TOKEN = $AdminToken }
 if ($SupabaseUrl) { $env:SUPABASE_URL = $SupabaseUrl }
 if ($SupabaseServiceRoleKey) { $env:SUPABASE_SERVICE_ROLE_KEY = $SupabaseServiceRoleKey }
 if ($RequireAuth) { $env:REQUIRE_AUTH = "true" } else { $env:REQUIRE_AUTH = "false" }
+$env:VISIBILITY_RADIUS = $VisibilityRadius
+$env:ZONE_SIZE = $ZoneSize
+$env:SHARD_ID = $ShardId
+$env:SHARD_COUNT = $ShardCount
+$env:MAX_CONNECTIONS_PER_IP = $MaxConnectionsPerIp
 
 Write-Host "Starting server on port $Port (tick $TickRate Hz)..."
 

@@ -10,20 +10,35 @@ class World {
     this.msPerTick = Math.floor(1000 / this.tickRate);
 
     // Authoritative state
-    this.players = new Map(); // playerId -> { x, y, vx, vy, dir, lastCastAt, lastSnapshotTo, zoneId, lastSnapshot }
+    this.players = new Map(); // playerId -> { x, y, vx, vy, dir, lastCastAt, lastSnapshotTo, zoneId, lastSnapshot, lastChatAt }
     this.inputs = [];
     this.spatial = new SpatialHash(50);
 
     // interest management
-    this.visibilityRadius = 250; // units
-    this.zoneSize = 1000; // world divided into grid zones
+    this.visibilityRadius = Number(options.visibilityRadius) || 250; // units
+    this.zoneSize = Number(options.zoneSize) || 1000; // world divided into grid zones
+
+    // shard scaffolding
+    this.shardId = Number.isFinite(Number(options.shardId)) ? Number(options.shardId) : 0;
+    this.shardCount = Number.isFinite(Number(options.shardCount)) ? Number(options.shardCount) : 1;
 
     // Networking callbacks (wired by ws layer)
     this._send = null; // (playerId, msg)
     this._broadcast = null; // (msg)
     this._broadcastExcept = null; // (playerId, msg)
+    this._multicast = null; // (playerIds[], msg)
 
     this.running = false;
+
+    // metrics
+    this._metrics = {
+      startTs: Date.now(),
+      tickCount: 0,
+      lastTickMs: 0,
+      avgTickMs: 0,
+      inputsProcessed: 0,
+      snapshotsEmitted: 0,
+    };
   }
 
   start() {
@@ -47,15 +62,17 @@ class World {
   onSend(cb) { this._send = cb; }
   onBroadcast(cb) { this._broadcast = cb; }
   onBroadcastExcept(cb) { this._broadcastExcept = cb; }
+  onMulticast(cb) { this._multicast = cb; }
 
   send(playerId, msg) { if (this._send) this._send(playerId, msg); }
   broadcast(msg) { if (this._broadcast) this._broadcast(msg); }
   broadcastExcept(exceptId, msg) { if (this._broadcastExcept) this._broadcastExcept(exceptId, msg); }
+  multicast(playerIds, msg) { if (this._multicast) this._multicast(playerIds, msg); }
 
   addPlayer(playerId) {
     // Spawn at origin for now
     const zoneId = this.getZoneId(0,0);
-    this.players.set(playerId, { x: 0, y: 0, vx: 0, vy: 0, dir: 0, lastCastAt: 0, lastSnapshotTo: 0, zoneId, lastSnapshot: new Map() });
+    this.players.set(playerId, { x: 0, y: 0, vx: 0, vy: 0, dir: 0, lastCastAt: 0, lastSnapshotTo: 0, zoneId, lastSnapshot: new Map(), lastChatAt: 0 });
     this.spatial.upsert(playerId, 0, 0);
     // Notify others via ws layer
   }
@@ -66,6 +83,30 @@ class World {
 
   // Simple movement limits
   static clamp(val, min, max) { return Math.max(min, Math.min(max, val)); }
+
+  getNearbyPlayerIds(x, y, radius = this.visibilityRadius) {
+    return this.spatial.queryRadius(x, y, radius);
+  }
+
+  broadcastNearby(fromPlayerId, msg, radius = this.visibilityRadius) {
+    const origin = this.players.get(fromPlayerId);
+    if (!origin) return;
+    const ids = this.getNearbyPlayerIds(origin.x, origin.y, radius);
+    if (ids && ids.length) {
+      this.multicast(ids, msg);
+    }
+  }
+
+  zoneOwner(zx, zy) {
+    // simple 2D hash to shardId mapping
+    const h = ((zx * 73856093) ^ (zy * 19349663)) >>> 0; // ensure uint32
+    if (this.shardCount <= 0) return 0;
+    return h % this.shardCount;
+  }
+
+  isZoneLocal(zx, zy) {
+    return this.zoneOwner(zx, zy) === this.shardId;
+  }
 
   async processInput(input) {
     const { playerId, kind, payload } = input;
@@ -100,8 +141,18 @@ class World {
         return;
       }
       p.lastCastAt = now;
-      // For demo, broadcast a simple effect
-      this.broadcast({ type: 'ability_cast', by: playerId, at: now });
+      // Interest-based broadcast of cast event
+      this.broadcastNearby(playerId, { type: 'ability_cast', by: playerId, at: now });
+    } else if (kind === 'chat') {
+      const now = Date.now();
+      const minInterval = 400; // 2.5 msgs/sec max
+      if (now - (p.lastChatAt || 0) < minInterval) return;
+      p.lastChatAt = now;
+      const text = String(payload?.text || '').slice(0, 256);
+      if (!text) return;
+      // Slightly larger radius for chat than strict visibility
+      const chatRadius = Math.max(this.visibilityRadius, 350);
+      this.broadcastNearby(playerId, { type: 'chat', from: playerId, text, t: now }, chatRadius);
     } else if (kind === 'equip') {
       // defer to DB repo
       try {
@@ -121,9 +172,12 @@ class World {
   }
 
   tick(ms) {
+    const tickStart = Date.now();
+
     // Process pending inputs
     if (this.inputs.length) {
       const inputs = this.inputs.splice(0, this.inputs.length);
+      this._metrics.inputsProcessed += inputs.length;
       for (const input of inputs) this.processInput(input);
     }
 
@@ -141,11 +195,19 @@ class World {
         const deltas = this.computeDeltas(s.lastSnapshot || new Map(), current);
         if (deltas.add.length || deltas.update.length || deltas.remove.length) {
           this.send(id, { type: 'snapshot_delta', t: now, add: deltas.add, update: deltas.update, remove: deltas.remove });
+          this._metrics.snapshotsEmitted++;
         }
         s.lastSnapshot = current;
       }
       this._lastSnapshotAt = now;
     }
+
+    // tick metrics
+    const dt = Date.now() - tickStart;
+    this._metrics.lastTickMs = dt;
+    // EMA smoothing
+    this._metrics.avgTickMs = this._metrics.avgTickMs ? (this._metrics.avgTickMs * 0.9 + dt * 0.1) : dt;
+    this._metrics.tickCount++;
   }
 
   getZoneId(x, y) {
@@ -178,6 +240,17 @@ class World {
   }
 
   getSnapshotFor(_playerId) { return this.buildSnapshot(); }
+
+  getMetrics() {
+    return {
+      players: this.players.size,
+      visibilityRadius: this.visibilityRadius,
+      zoneSize: this.zoneSize,
+      shardId: this.shardId,
+      shardCount: this.shardCount,
+      ...this._metrics,
+    };
+  }
 }
 
 module.exports = { World };
