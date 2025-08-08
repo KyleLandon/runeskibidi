@@ -119,12 +119,16 @@ export class SkillManager {
       skill.xpToNext = 0; // Max level
     }
     
-    return {
+    const result: SkillGain = {
       skill: skillName,
       xpGained: amount,
       newLevel: leveledUp ? newLevel : undefined,
       leveledUp
     };
+    try {
+      window.dispatchEvent(new CustomEvent('skills-updated', { detail: { skill: skillName, result } }));
+    } catch {}
+    return result;
   }
 
   // Get XP required for a specific level

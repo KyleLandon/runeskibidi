@@ -1,0 +1,136 @@
+export type LatencyHandler = (ms: number, avgMs: number) => void;
+export type PlayerEventHandler = (playerId: string) => void;
+export type PlayerMoveHandler = (playerId: string, pos: { x: number; y: number; z: number }) => void;
+export type ChatHandler = (from: string, text: string, t: number) => void;
+
+export class NetworkManager {
+  private ws: WebSocket | null = null;
+  private url: string;
+  private playerId: string;
+  private sessionId: string;
+  private apiBase: string;
+  private latencySamples: number[] = [];
+  private maxSamples = 12;
+  private pingIntervalId: number | null = null;
+  private presenceIntervalId: number | null = null;
+  onLatency: LatencyHandler | null = null;
+  onWelcome: ((playerId: string) => void) | null = null;
+  onPlayerJoined: PlayerEventHandler | null = null;
+  onPlayerLeft: PlayerEventHandler | null = null;
+  onPlayerMoved: PlayerMoveHandler | null = null;
+  onChat: ChatHandler | null = null;
+  // Reserved for future server reconciliation
+  // private positionProvider: (() => { x: number; y: number; z: number } | null) | null = null;
+
+  constructor(url: string, apiBase: string, playerId: string, sessionId: string) {
+    this.url = url;
+    this.apiBase = apiBase.replace(/\/$/, '');
+    this.playerId = playerId;
+    this.sessionId = sessionId;
+  }
+
+  connect() {
+    this.ws = new WebSocket(this.url);
+    this.ws.onopen = () => {
+      this.safePost('/api/connection', { playerId: this.playerId, sessionId: this.sessionId, event: 'connected', timestamp: Date.now() });
+      this.send({ type: 'hello', playerId: this.playerId });
+      this.startPing();
+      this.startPresence();
+    };
+    this.ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'welcome' && msg.playerId && this.onWelcome) {
+          this.onWelcome(msg.playerId);
+        }
+        if (msg.type === 'pong' && typeof msg.clientT === 'number') {
+          const rtt = Date.now() - msg.clientT;
+          this.recordLatency(rtt);
+          return;
+        }
+        if (msg.type === 'player_joined' && msg.playerId && this.onPlayerJoined) {
+          this.onPlayerJoined(msg.playerId);
+          return;
+        }
+        if (msg.type === 'player_left' && msg.playerId && this.onPlayerLeft) {
+          this.onPlayerLeft(msg.playerId);
+          return;
+        }
+        if (msg.type === 'player_moved' && msg.playerId && msg.pos && this.onPlayerMoved) {
+          this.onPlayerMoved(msg.playerId, msg.pos);
+          return;
+        }
+        if (msg.type === 'chat' && msg.from && typeof msg.text === 'string') {
+          this.onChat?.(msg.from, msg.text, msg.t || Date.now());
+          return;
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+    this.ws.onclose = () => {
+      this.safePost('/api/connection', { playerId: this.playerId, sessionId: this.sessionId, event: 'disconnected', timestamp: Date.now() });
+      this.stopPing();
+      this.stopPresence();
+      // optional: reconnect logic later
+    };
+    window.addEventListener('beforeunload', () => {
+      try {
+        navigator.sendBeacon(`${this.apiBase}/api/connection`, JSON.stringify({ playerId: this.playerId, sessionId: this.sessionId, event: 'disconnected', timestamp: Date.now() }));
+      } catch {}
+    });
+  }
+
+  private startPing() {
+    this.pingIntervalId = window.setInterval(() => {
+      this.send({ type: 'ping', t: Date.now() });
+    }, 5000);
+  }
+  private stopPing() {
+    if (this.pingIntervalId) window.clearInterval(this.pingIntervalId);
+    this.pingIntervalId = null;
+  }
+
+  private startPresence() {
+    this.presenceIntervalId = window.setInterval(() => {
+      this.safePost('/api/connection', { playerId: this.playerId, sessionId: this.sessionId, event: 'presence', timestamp: Date.now() });
+    }, 30000);
+  }
+  private stopPresence() {
+    if (this.presenceIntervalId) window.clearInterval(this.presenceIntervalId);
+    this.presenceIntervalId = null;
+  }
+
+  private recordLatency(ms: number) {
+    this.latencySamples.push(ms);
+    if (this.latencySamples.length > this.maxSamples) this.latencySamples.shift();
+    const avg = this.latencySamples.reduce((a, b) => a + b, 0) / this.latencySamples.length;
+    if (this.onLatency) this.onLatency(ms, avg);
+  }
+
+  private send(obj: any) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(obj));
+    }
+  }
+
+  sendMove(pos: { x: number; y: number; z: number }) {
+    this.send({ type: 'move', pos });
+  }
+
+  sendChat(text: string) {
+    this.send({ type: 'chat', text });
+  }
+
+  // setPositionProvider(getter: () => { x: number; y: number; z: number } | null) {
+  //   this.positionProvider = getter;
+  // }
+
+  private async safePost(path: string, body: any) {
+    try {
+      await fetch(`${this.apiBase}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    } catch {}
+  }
+}
+
+

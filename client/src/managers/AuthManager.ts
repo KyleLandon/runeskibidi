@@ -9,11 +9,15 @@ export class AuthManager {
   async login(email: string, password: string) {
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw new Error(error.message);
+    await this.ensurePlayerRecord();
   }
   
   async register(email: string, password: string) {
     const { error } = await supabase.auth.signUp({ email, password });
     if (error) throw new Error(error.message);
+    // After sign up, a session might not be active until email confirmation depending on settings
+    // Attempt to ensure player record if session exists
+    await this.ensurePlayerRecord().catch(() => {});
   }
   
   async getSession(): Promise<any> {
@@ -68,6 +72,8 @@ export class AuthManager {
   async createCharacter(opts: CharacterCreateOptions): Promise<void> {
     const userId = await this.getCurrentUserId();
     if (!userId) throw new Error('Not logged in');
+    // Ensure a corresponding players row exists to satisfy FK
+    await this.ensurePlayerRecord();
     
     // Check if character name is already taken by this user
     const { data: existingChars } = await supabase
@@ -103,8 +109,9 @@ export class AuthManager {
       charisma: opts.starting_stats.charisma,
       willpower: opts.starting_stats.willpower,
       // Starting position (could be customized later)
-      position_x: 400,
-      position_y: 300,
+      position_x: 0,
+      position_y: 1,
+      position_z: 0,
       world_id: 'starter_world'
     };
     
@@ -155,6 +162,17 @@ export class AuthManager {
         // Don't throw error here - character is created, items can be added later
       }
     }
+  }
+
+  private async ensurePlayerRecord(): Promise<void> {
+    const { data: userData } = await supabase.auth.getUser();
+    const uid = userData.user?.id;
+    const email = userData.user?.email || '';
+    if (!uid) return;
+    const username = (userData.user?.user_metadata?.username as string) || (email ? email.split('@')[0] : `user_${uid.substring(0, 6)}`);
+    // Upsert player row guarded by RLS (id must equal auth.uid())
+    const { error } = await supabase.from('players').upsert({ id: uid, username, email }).eq('id', uid);
+    if (error) throw new Error(error.message);
   }
   
   private getStartingSkills(focus: string): { name: string; level: number }[] {

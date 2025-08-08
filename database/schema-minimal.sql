@@ -136,6 +136,28 @@ CREATE TABLE IF NOT EXISTS skills (
 );
 ALTER TABLE skills REPLICA IDENTITY FULL;
 
+-- Presence (optional)
+CREATE TABLE IF NOT EXISTS player_presence (
+  player_id UUID PRIMARY KEY,
+  last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  server_id TEXT NOT NULL DEFAULT 'single',
+  pos_x REAL DEFAULT 0,
+  pos_y REAL DEFAULT 0,
+  pos_z REAL DEFAULT 0
+);
+ALTER TABLE player_presence ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  CREATE POLICY presence_owner_upd ON player_presence FOR UPDATE USING (auth.uid() = player_id) WITH CHECK (auth.uid() = player_id);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE POLICY presence_owner_ins ON player_presence FOR INSERT WITH CHECK (auth.uid() = player_id);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE POLICY presence_public_read ON player_presence FOR SELECT USING (true);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER PUBLICATION supabase_realtime ADD TABLE player_presence;
+CREATE INDEX IF NOT EXISTS idx_presence_last_seen ON player_presence (last_seen DESC);
+
 -- Triggers
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$

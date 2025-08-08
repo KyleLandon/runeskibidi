@@ -55,6 +55,23 @@ export class UIManager {
     this.visible ? this.hide() : this.show();
   }
 
+  close() { this.hide(); }
+
+  showPanel(panelKey: 'inventory' | 'equipment' | 'skills' | 'stats') {
+    if (!this.visible) this.show();
+    let target: HTMLElement | null = null;
+    if (panelKey === 'inventory') target = this.inventoryPanel.el;
+    if (panelKey === 'equipment') target = this.equipmentPanel.el;
+    if (panelKey === 'skills') target = this.skillsPanel.el;
+    if (panelKey === 'stats') target = this.statsPanel.el;
+    target?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    // Brief highlight
+    if (target) {
+      target.classList.add('ui-panel-flash');
+      setTimeout(() => target && target.classList.remove('ui-panel-flash'), 600);
+    }
+  }
+
   refreshUI() {
     // Update all panels with current player data
     this.renderStats(this.player.stats);
@@ -127,7 +144,7 @@ export class UIManager {
       // Shift-click to equip
       slot.addEventListener('click', (e) => {
         if ((e as MouseEvent).shiftKey && inventory[i]) {
-          const item = inventory[i];
+          const item = inventory[i] as string;
           const slotName = this.getEquipSlotForItem(item);
           if (slotName && !this.player.equipment[slotName]) {
             this.player.equipment[slotName] = item;

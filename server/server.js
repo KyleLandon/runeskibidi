@@ -3,15 +3,29 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 const app = express();
 const PORT = process.env.PORT || 4000;
 const http = require('http');
 const { setupWebSocketServer } = require('./ws');
 
-app.use(cors());
+// Trust proxy when behind a load balancer (e.g., Render/Heroku/Nginx)
+app.set('trust proxy', 1);
+
+// Security & performance middleware
 app.use(helmet());
+app.use(compression());
 app.use(express.json({ limit: '256kb' }));
 app.use(morgan('tiny'));
+
+// Tighten CORS by origin if configured
+const allowedOrigin = process.env.CORS_ORIGIN;
+app.use(cors(allowedOrigin ? { origin: allowedOrigin, credentials: true } : {}));
+
+// Basic rate limiting on API
+const limiter = rateLimit({ windowMs: 60 * 1000, max: 200 });
+app.use('/api', limiter);
 
 // In-memory store for demo (replace with DB or Supabase integration as needed)
 let connections = [];
@@ -32,6 +46,12 @@ app.post('/api/connection', (req, res) => {
     });
   } else if (event === 'disconnected') {
     activePlayers.delete(playerId);
+  } else if (event === 'presence') {
+    const rec = activePlayers.get(playerId);
+    if (rec) {
+      rec.lastSeen = new Date(timestamp);
+      activePlayers.set(playerId, rec);
+    }
   }
   
   logs.push(`[${new Date(timestamp).toISOString()}] ${event} - Player: ${playerId}, Session: ${sessionId}`);
@@ -75,6 +95,11 @@ app.delete('/api/players', (req, res) => {
 
 // Admin panel: view connections and logs
 app.get('/admin', (req, res) => {
+  // Basic token auth if ADMIN_TOKEN is set
+  const token = process.env.ADMIN_TOKEN;
+  if (token && req.headers['x-admin-token'] !== token) {
+    return res.status(401).send('Unauthorized');
+  }
   res.send(`
     <!DOCTYPE html>
     <html lang="en">
@@ -418,7 +443,17 @@ app.get('/admin', (req, res) => {
   `);
 });
 
+// Health checks
+app.get('/healthz', (_req, res) => res.status(200).json({ ok: true }));
+app.get('/readyz', (_req, res) => res.status(200).json({ ok: true }));
+
 const server = http.createServer(app);
+// Reduce Nagle latency
+server.on('connection', (socket) => socket.setNoDelay(true));
+
+// Tune HTTP timeouts for keep-alive
+server.keepAliveTimeout = 60_000; // 60s
+server.headersTimeout = 65_000; // keepAliveTimeout + buffer
 setupWebSocketServer(server);
 
 // TODO: Add game tick/loop logic here for authoritative world state

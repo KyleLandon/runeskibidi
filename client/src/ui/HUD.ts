@@ -1,6 +1,8 @@
 export class HUD {
   el: HTMLDivElement;
   healthBar: HTMLDivElement;
+  manaBar: HTMLDivElement;
+  xpBar: HTMLDivElement;
   resourcesPanel: HTMLDivElement;
   actionsPanel: HTMLDivElement;
 
@@ -15,6 +17,30 @@ export class HUD {
       <div class="health-bg">
         <div class="health-fill"></div>
         <span class="health-text">100/100</span>
+      </div>
+      <div class="chat-panel">
+        <div class="chat-log" id="chat-log"></div>
+        <input id="chat-input" class="chat-input" placeholder="Type message and press Enter" maxlength="256" />
+      </div>
+    `;
+
+    // Mana bar
+    this.manaBar = document.createElement('div');
+    this.manaBar.className = 'mana-bar';
+    this.manaBar.innerHTML = `
+      <div class="mana-bg">
+        <div class="mana-fill"></div>
+        <span class="mana-text">50/50</span>
+      </div>
+    `;
+
+    // XP bar
+    this.xpBar = document.createElement('div');
+    this.xpBar.className = 'xp-bar';
+    this.xpBar.innerHTML = `
+      <div class="xp-bg">
+        <div class="xp-fill"></div>
+        <span class="xp-text">XP 0%</span>
       </div>
     `;
     
@@ -47,6 +73,7 @@ export class HUD {
       <div class="performance-stats">
         <div class="fps-display">FPS: <span id="fps">--</span></div>
         <div class="gpu-info">GPU: Optimized</div>
+        <div class="latency-display">Ping: <span id="ping">--</span> ms</div>
       </div>
       <div class="hud-buttons">
         <button id="btn-toggle-inventory" title="Toggle Inventory (Tab)">Inventory</button>
@@ -60,6 +87,8 @@ export class HUD {
     `;
     
     this.el.appendChild(this.healthBar);
+    this.el.appendChild(this.manaBar);
+    this.el.appendChild(this.xpBar);
     this.el.appendChild(this.resourcesPanel);
     this.el.appendChild(this.actionsPanel);
     
@@ -86,6 +115,22 @@ export class HUD {
     if (healthText) {
       healthText.textContent = `${current}/${max}`;
     }
+  }
+
+  updateMana(current: number, max: number) {
+    const percentage = (current / max) * 100;
+    const fill = this.manaBar.querySelector('.mana-fill') as HTMLDivElement;
+    const text = this.manaBar.querySelector('.mana-text') as HTMLSpanElement;
+    if (fill) fill.style.width = `${percentage}%`;
+    if (text) text.textContent = `${current}/${max}`;
+  }
+
+  updateXP(percent: number) {
+    const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+    const fill = this.xpBar.querySelector('.xp-fill') as HTMLDivElement;
+    const text = this.xpBar.querySelector('.xp-text') as HTMLSpanElement;
+    if (fill) fill.style.width = `${clamped}%`;
+    if (text) text.textContent = `XP ${clamped}%`;
   }
 
   updateResources(resources: { wood?: number; ore?: number; gems?: number; berries?: number }) {
@@ -136,5 +181,29 @@ export class HUD {
         fpsElement.style.color = '#ef4444';
       }
     }
+  }
+
+  updateLatency(ms: number) {
+    const el = document.getElementById('ping');
+    if (!el) return;
+    el.textContent = ms.toFixed(0);
+    const n = ms;
+    if (n < 80) {
+      (el as HTMLElement).style.color = '#4ade80';
+    } else if (n < 140) {
+      (el as HTMLElement).style.color = '#fbbf24';
+    } else {
+      (el as HTMLElement).style.color = '#ef4444';
+    }
+  }
+
+  appendChat(from: string, text: string) {
+    const log = document.getElementById('chat-log');
+    if (!log) return;
+    const row = document.createElement('div');
+    row.className = 'chat-row';
+    row.textContent = `${from}: ${text}`;
+    log.appendChild(row);
+    (log as HTMLElement).scrollTop = (log as HTMLElement).scrollHeight;
   }
 } 

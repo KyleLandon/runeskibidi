@@ -11,6 +11,9 @@ export class Game3D {
   private raycaster = new THREE.Raycaster();
   private pointer = new THREE.Vector2();
   private targetPosition: THREE.Vector3 | null = null;
+  private network: any | null = null;
+  private otherPlayers: Map<string, THREE.Mesh> = new Map();
+  private renderOtherPlayers = false; // toggle rendering of remote players
 
   // Orbit camera state (OSRS-style)
   private camYaw = 0; // radians
@@ -28,23 +31,35 @@ export class Game3D {
   private pitchSpeed = 0.005;
   private yawNudge = THREE.MathUtils.degToRad(10);
 
+  // Context menu UI
+  private ctxMenuEl: HTMLDivElement | null = null;
+  private tooltipEl: HTMLDivElement | null = null;
+  private hoverTarget: THREE.Object3D | null = null;
+  private pathRing: THREE.Object3D | null = null;
+  private pathRingLife = 0;
+
   constructor() {
     this.clock = new THREE.Clock();
   }
 
-  static async create(container: HTMLElement): Promise<Game3D> {
+  static async create(container: HTMLElement, network?: any): Promise<Game3D> {
     const game = new Game3D();
     game.container = container;
+    game.network = network || null;
     game.initRenderer();
     game.initScene();
     game.initCamera();
     game.initLights();
     game.initGround();
     game.initPlayer();
+    game.initSampleTargets();
     game.bindEvents();
     // Ensure camera positioned relative to player
     game.updateCameraImmediate();
+    game.createContextMenu();
+    game.createTooltip();
     game.animate();
+    game.initNetworking();
     return game;
   }
 
@@ -92,6 +107,49 @@ export class Game3D {
     this.scene.add(this.player);
   }
 
+  private initNetworking() {
+    if (!this.network) return;
+    this.network.onPlayerJoined = (playerId: string) => {
+      if (!this.renderOtherPlayers) return;
+      if (this.otherPlayers.has(playerId)) return;
+      const body = new THREE.CapsuleGeometry(0.4, 1.0, 4, 8);
+      const mat = new THREE.MeshStandardMaterial({ color: 0x9ca3af });
+      const m = new THREE.Mesh(body, mat);
+      m.position.set(0, 1, 0);
+      this.otherPlayers.set(playerId, m);
+      this.scene.add(m);
+    };
+    this.network.onPlayerLeft = (playerId: string) => {
+      const m = this.otherPlayers.get(playerId);
+      if (m) { this.scene.remove(m); (m.material as any).dispose?.(); m.geometry.dispose(); this.otherPlayers.delete(playerId); }
+    };
+    this.network.onPlayerMoved = (playerId: string, pos: { x: number; y: number; z: number }) => {
+      if (!this.renderOtherPlayers) return;
+      const m = this.otherPlayers.get(playerId);
+      if (m) m.position.set(pos.x, pos.y, pos.z);
+    };
+  }
+
+  private initSampleTargets() {
+    // Sample NPC
+    const npcGeo = new THREE.ConeGeometry(0.5, 1.6, 8);
+    const npcMat = new THREE.MeshStandardMaterial({ color: 0xb56576 });
+    const npc = new THREE.Mesh(npcGeo, npcMat);
+    npc.position.set(4, 0.8, -3);
+    npc.userData.type = 'npc';
+    npc.name = 'NPC Guard';
+    this.scene.add(npc);
+
+    // Sample Object (Rock)
+    const objGeo = new THREE.IcosahedronGeometry(0.7, 0);
+    const objMat = new THREE.MeshStandardMaterial({ color: 0x888888 });
+    const rock = new THREE.Mesh(objGeo, objMat);
+    rock.position.set(-5, 0.7, 2);
+    rock.userData.type = 'object';
+    rock.name = 'Rock';
+    this.scene.add(rock);
+  }
+
   private bindEvents() {
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
@@ -99,7 +157,7 @@ export class Game3D {
       this.renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
-    this.renderer.domElement.addEventListener('pointerdown', (e: PointerEvent) => {
+    this.renderer.domElement.addEventListener('pointerdown', async (e: PointerEvent) => {
       const rect = this.renderer.domElement.getBoundingClientRect();
       const sx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       const sy = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -107,7 +165,7 @@ export class Game3D {
       this.raycaster.setFromCamera(this.pointer, this.camera);
       const hits = this.raycaster.intersectObjects(this.scene.children, true);
       const groundHit = hits.find((h: THREE.Intersection) => (h.object as THREE.Object3D).name === 'GROUND');
-      const firstNonGround = hits.find((h: THREE.Intersection) => (h.object as THREE.Object3D).name !== 'GROUND');
+      const firstNonGround = hits.find((h: THREE.Intersection) => (h.object as THREE.Object3D).name !== 'GROUND' && (h.object as THREE.Object3D) !== this.player);
 
       // LMB: Move
       if (e.button === 0) {
@@ -115,14 +173,19 @@ export class Game3D {
           const point = groundHit.point.clone();
           point.y = 1;
           this.targetPosition = point;
+          this.showPathRing(point);
+          window.dispatchEvent(new CustomEvent('game-action', { detail: { type: 'move', text: `Moving to (${point.x.toFixed(1)}, ${point.z.toFixed(1)})` } }));
+          this.network?.sendMove({ x: point.x, y: 1, z: point.z });
         }
       }
 
       // RMB: Interact/attack or context when Shift held
       if (e.button === 2) {
+        // Always suppress browser context menu
+        (e as MouseEvent).preventDefault();
         if ((e as MouseEvent).shiftKey) {
           // Shift+RMB: open context menu
-          this.showContextMenu(e.clientX, e.clientY, groundHit?.point || null);
+          this.showContextMenu(e.clientX, e.clientY, firstNonGround || null, groundHit || null);
         } else {
           if (firstNonGround) {
             // Interact: move to hit point and log action (placeholder)
@@ -130,10 +193,37 @@ export class Game3D {
             p.y = 1;
             this.targetPosition = p;
             console.log('Interact/Attack target:', (firstNonGround.object as THREE.Object3D).name || firstNonGround.object.uuid);
+            this.flashObject(firstNonGround.object as THREE.Object3D);
+            const label = (firstNonGround.object as THREE.Object3D).name || 'Target';
+            window.dispatchEvent(new CustomEvent('game-action', { detail: { type: 'interact', text: `Interacting with ${label}` } }));
+            // Grant some XP for demo when interacting with rock or NPC
+            const kind = this.classifyTarget(firstNonGround.object as THREE.Object3D);
+            try {
+              const { SkillManager } = await import('../managers/SkillManager');
+              const sm = SkillManager.getInstance();
+              if (kind === 'object') {
+                const objName = (firstNonGround.object as THREE.Object3D).name.toLowerCase();
+                const type = objName.includes('rock') ? 'rock' : objName.includes('crystal') ? 'crystal' : objName.includes('tree') ? 'tree' : 'rock';
+                const can = sm.canGather('mining', type);
+                if (can.canGather) {
+                  const xp = sm.calculateXPGain('mining', type);
+                  sm.addXP('mining', xp);
+                  window.dispatchEvent(new CustomEvent('game-action', { detail: { type: 'gather', text: `Gained ${xp} Mining XP` } }));
+                } else {
+                  window.dispatchEvent(new CustomEvent('game-action', { detail: { type: 'gather', text: `Requires Mining ${can.levelRequired}` } }));
+                }
+              } else if (kind === 'npc') {
+                sm.addXP('attack', 20);
+                window.dispatchEvent(new CustomEvent('game-action', { detail: { type: 'combat', text: `Practiced combat: +20 Attack XP` } }));
+              }
+            } catch {}
           } else if (groundHit) {
             const p = groundHit.point.clone();
             p.y = 1;
             this.targetPosition = p;
+            this.showPathRing(p);
+            window.dispatchEvent(new CustomEvent('game-action', { detail: { type: 'move', text: `Moving to (${p.x.toFixed(1)}, ${p.z.toFixed(1)})` } }));
+            this.network?.sendMove({ x: p.x, y: 1, z: p.z });
           }
         }
       }
@@ -157,6 +247,25 @@ export class Game3D {
       this.camPitch = THREE.MathUtils.clamp(this.camPitch - dy * this.pitchSpeed, this.minPitch, this.maxPitch);
     });
 
+    // Hover tooltip detection
+    this.renderer.domElement.addEventListener('mousemove', (e: MouseEvent) => {
+      const rect = this.renderer.domElement.getBoundingClientRect();
+      const sx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      const sy = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      this.pointer.set(sx, sy);
+      this.raycaster.setFromCamera(this.pointer, this.camera);
+      const hits = this.raycaster.intersectObjects(this.scene.children, true);
+      const hit = hits.find(h => (h.object as THREE.Object3D) !== this.player && (h.object as THREE.Object3D).name !== 'GROUND');
+      if (hit) {
+        this.hoverTarget = hit.object as THREE.Object3D;
+        const label = this.hoverTarget.name || (this.hoverTarget.userData?.type || 'Object');
+        this.showTooltip(e.clientX, e.clientY, label);
+      } else {
+        this.hoverTarget = null;
+        this.hideTooltip();
+      }
+    });
+
     const endOrbit = () => { this.isOrbiting = false; };
     window.addEventListener('pointerup', endOrbit);
     window.addEventListener('pointerleave', endOrbit);
@@ -176,9 +285,19 @@ export class Game3D {
     });
 
     this.renderer.domElement.addEventListener('contextmenu', (e: MouseEvent) => {
-      // Only allow context menu when Shift is held, otherwise prevent default
-      if (!(e as MouseEvent).shiftKey) {
-        e.preventDefault();
+      // Always prevent the browser menu on the canvas
+      e.preventDefault();
+      if ((e as MouseEvent).shiftKey) {
+        // If Shift was held, show menu with current ray under cursor
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        const sx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        const sy = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        this.pointer.set(sx, sy);
+        this.raycaster.setFromCamera(this.pointer, this.camera);
+        const hits = this.raycaster.intersectObjects(this.scene.children, true);
+        const groundHit = hits.find(h => (h.object as THREE.Object3D).name === 'GROUND') || null;
+        const firstNonGround = hits.find(h => (h.object as THREE.Object3D).name !== 'GROUND' && (h.object as THREE.Object3D) !== this.player) || null;
+        this.showContextMenu(e.clientX, e.clientY, firstNonGround, groundHit);
       }
     });
   }
@@ -197,6 +316,24 @@ export class Game3D {
       }
     }
     this.smoothUpdateCamera();
+
+    // Animate path ring
+    if (this.pathRing && this.pathRingLife > 0) {
+      this.pathRingLife -= delta;
+      const material = (this.pathRing as any).material as THREE.Material & { opacity?: number };
+      if (material && 'opacity' in material) {
+        material.opacity = Math.max(0, this.pathRingLife / 0.8);
+      }
+      this.pathRing.scale.setScalar(1 + (1 - (material?.opacity ?? 0)) * 0.5);
+      if (this.pathRingLife <= 0) {
+        this.scene.remove(this.pathRing);
+        const geo = (this.pathRing as any).geometry as THREE.BufferGeometry | undefined;
+        const mat = (this.pathRing as any).material as THREE.Material | undefined;
+        geo?.dispose();
+        mat?.dispose?.();
+        this.pathRing = null;
+      }
+    }
   }
 
   private animate = () => {
@@ -206,9 +343,117 @@ export class Game3D {
     requestAnimationFrame(this.animate);
   };
 
-  // Placeholder to satisfy Shift+RMB context usage; implement full menu later
-  private showContextMenu(_x: number, _y: number, _point: THREE.Vector3 | null) {
-    console.log('Context menu at', _x, _y, 'point:', _point);
+  public getCameraYaw(): number {
+    return this.camYaw;
+  }
+
+  private classifyTarget(object: THREE.Object3D): 'npc' | 'object' | 'player' | 'unknown' {
+    if (object === this.player) return 'player';
+    const t = (object as any).userData?.type as string | undefined;
+    if (t === 'npc') return 'npc';
+    if (t === 'object') return 'object';
+    const name = (object.name || '').toUpperCase();
+    if (name.startsWith('NPC')) return 'npc';
+    if (name.startsWith('OBJ') || name.startsWith('OBJECT')) return 'object';
+    return 'unknown';
+  }
+
+  private createContextMenu() {
+    const menu = document.createElement('div');
+    menu.style.position = 'fixed';
+    menu.style.zIndex = '10000';
+    menu.style.background = '#1f2430';
+    menu.style.border = '1px solid #3b4252';
+    menu.style.borderRadius = '6px';
+    menu.style.padding = '6px 0';
+    menu.style.minWidth = '180px';
+    menu.style.color = '#e5e7eb';
+    menu.style.font = "14px 'Segoe UI', Arial, sans-serif";
+    menu.style.boxShadow = '0 6px 18px rgba(0,0,0,0.35)';
+    menu.style.display = 'none';
+    document.body.appendChild(menu);
+    this.ctxMenuEl = menu;
+    // Prevent native browser context menu over our custom menu
+    menu.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    const hide = () => { if (this.ctxMenuEl) this.ctxMenuEl.style.display = 'none'; };
+    window.addEventListener('click', hide);
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
+  }
+
+  private showContextMenu(clientX: number, clientY: number, targetHit: THREE.Intersection | null, groundHit: THREE.Intersection | null) {
+    if (!this.ctxMenuEl) return;
+    const menu = this.ctxMenuEl;
+    menu.innerHTML = '';
+
+    const addItem = (label: string, cb: () => void, emphasize = false) => {
+      const item = document.createElement('div');
+      item.textContent = label;
+      item.style.padding = '8px 12px';
+      item.style.cursor = 'pointer';
+      item.style.fontWeight = emphasize ? '600' : '400';
+      item.onmouseenter = () => { item.style.background = '#2b3040'; };
+      item.onmouseleave = () => { item.style.background = 'transparent'; };
+      item.onclick = () => { cb(); menu.style.display = 'none'; };
+      menu.appendChild(item);
+    };
+
+    const addDivider = () => {
+      const hr = document.createElement('div');
+      hr.style.height = '1px';
+      hr.style.background = '#3b4252';
+      hr.style.margin = '6px 0';
+      menu.appendChild(hr);
+    };
+
+    if (targetHit && (targetHit.object as THREE.Object3D) !== this.player) {
+      const object = targetHit.object as THREE.Object3D;
+      const kind = this.classifyTarget(object);
+      const label = object.name || (kind === 'npc' ? 'NPC' : 'Object');
+
+      // Title
+      const title = document.createElement('div');
+      title.textContent = label;
+      title.style.padding = '6px 12px';
+      title.style.color = '#9aa3b2';
+      title.style.fontSize = '12px';
+      menu.appendChild(title);
+      addDivider();
+
+      if (kind === 'npc') {
+        addItem('Attack', () => {
+          const p = targetHit.point.clone(); p.y = 1; this.targetPosition = p;
+          console.log('Attack', label);
+        }, true);
+      } else {
+        addItem('Interact', () => {
+          const p = targetHit.point.clone(); p.y = 1; this.targetPosition = p;
+          console.log('Interact with', label);
+        }, true);
+      }
+      addItem('Examine', () => { console.log('Examine', label, object); });
+      if (groundHit) {
+        addDivider();
+        addItem('Move here', () => {
+          const p = groundHit.point.clone(); p.y = 1; this.targetPosition = p;
+        });
+      }
+    } else if (groundHit) {
+      addItem('Move here', () => {
+        const p = groundHit.point.clone(); p.y = 1; this.targetPosition = p;
+      }, true);
+      addItem('Examine ground', () => {
+        console.log('Ground', groundHit.point.x.toFixed(2), groundHit.point.z.toFixed(2));
+      });
+    } else {
+      addItem('Nothing to do here', () => {});
+    }
+
+    const clampX = Math.min(clientX, window.innerWidth - 200);
+    const clampY = Math.min(clientY, window.innerHeight - 160);
+    menu.style.left = `${clampX}px`;
+    menu.style.top = `${clampY}px`;
+    menu.style.display = 'block';
   }
 
   private updateCameraImmediate() {
@@ -223,6 +468,74 @@ export class Game3D {
   private smoothUpdateCamera() {
     this.camDistance = THREE.MathUtils.lerp(this.camDistance, this.targetCamDistance, 0.1);
     this.updateCameraImmediate();
+  }
+
+  private createTooltip() {
+    const tip = document.createElement('div');
+    tip.style.position = 'fixed';
+    tip.style.padding = '4px 8px';
+    tip.style.borderRadius = '4px';
+    tip.style.background = 'rgba(20,23,28,0.9)';
+    tip.style.color = '#e5e7eb';
+    tip.style.font = "12px 'Segoe UI', Arial, sans-serif";
+    tip.style.pointerEvents = 'none';
+    tip.style.zIndex = '10001';
+    tip.style.display = 'none';
+    document.body.appendChild(tip);
+    this.tooltipEl = tip;
+  }
+
+  private showTooltip(x: number, y: number, text: string) {
+    if (!this.tooltipEl) return;
+    this.tooltipEl.textContent = text;
+    const clampX = Math.min(x + 12, window.innerWidth - 160);
+    const clampY = Math.min(y + 12, window.innerHeight - 24);
+    this.tooltipEl.style.left = `${clampX}px`;
+    this.tooltipEl.style.top = `${clampY}px`;
+    this.tooltipEl.style.display = 'block';
+  }
+
+  private hideTooltip() {
+    if (this.tooltipEl) this.tooltipEl.style.display = 'none';
+  }
+
+  private showPathRing(at: THREE.Vector3) {
+    if (this.pathRing) {
+      this.scene.remove(this.pathRing);
+      const geoPrev = (this.pathRing as any).geometry as THREE.BufferGeometry | undefined;
+      const matPrev = (this.pathRing as any).material as THREE.Material | undefined;
+      geoPrev?.dispose();
+      matPrev?.dispose?.();
+      this.pathRing = null;
+    }
+    // Create a thin outline circle (no filled disk) to avoid "shadow" look
+    const segments = 64;
+    const radius = 0.7;
+    const points: THREE.Vector3[] = [];
+    for (let i = 0; i < segments; i++) {
+      const t = (i / segments) * Math.PI * 2;
+      points.push(new THREE.Vector3(Math.cos(t) * radius, 0, Math.sin(t) * radius));
+    }
+    const geo = new THREE.BufferGeometry().setFromPoints(points);
+    // Rotate to lay flat on ground
+    geo.rotateX(-Math.PI / 2);
+    const mat = new THREE.LineBasicMaterial({ color: 0x00ff88, transparent: true, opacity: 0.9 });
+    const line = new THREE.LineLoop(geo, mat);
+    line.position.set(at.x, 0.02, at.z);
+    line.renderOrder = 2; // draw on top
+    (mat as any).depthTest = false; // avoid z-fighting; treat like UI overlay
+    this.scene.add(line);
+    this.pathRing = line;
+    this.pathRingLife = 0.8; // seconds
+  }
+
+  private flashObject(obj: THREE.Object3D) {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh || !mesh.material) return;
+    const mat = (mesh.material as any);
+    const prev = mat.color ? mat.color.clone() : null;
+    if (mat.color) mat.color.setHex(0xff5555);
+    setTimeout(() => { if (mat.color && prev) mat.color.copy(prev); }, 200);
   }
 }
 

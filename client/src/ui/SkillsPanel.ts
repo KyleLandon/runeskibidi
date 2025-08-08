@@ -9,6 +9,7 @@ export class SkillsPanel {
     this.el = document.createElement('div');
     this.el.className = 'skills-panel';
     this.createSkillsPanel();
+    window.addEventListener('skills-updated', () => this.updateSkillsDisplay());
   }
 
   createSkillsPanel() {
