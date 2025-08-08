@@ -1,0 +1,13 @@
+# Replace with your domain
+game.example.com {
+  encode zstd gzip
+  @ws {
+    header Connection *Upgrade*
+    header Upgrade websocket
+    path /
+  }
+
+  reverse_proxy @ws localhost:4000
+}
+
+

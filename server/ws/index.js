@@ -93,6 +93,16 @@ function setupWebSocketServer(server, world, options = {}) {
           world.broadcast({ type: 'chat', from: playerId, text: String(data.text || '').slice(0,256), t: Date.now() });
           return;
         }
+        case 'equip': {
+          // payload: { slotIndex }
+          world.queueInput({ playerId, kind: 'equip', payload: data });
+          return;
+        }
+        case 'unequip': {
+          // payload: { slot }
+          world.queueInput({ playerId, kind: 'unequip', payload: data });
+          return;
+        }
         default:
           return;
       }
