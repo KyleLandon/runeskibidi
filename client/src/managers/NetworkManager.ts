@@ -9,10 +9,12 @@ export class NetworkManager {
   private playerId: string;
   private sessionId: string;
   private apiBase: string;
+  private authToken: string | null = null;
   private latencySamples: number[] = [];
   private maxSamples = 12;
   private pingIntervalId: number | null = null;
   private presenceIntervalId: number | null = null;
+  private seqCounter = 0;
   onLatency: LatencyHandler | null = null;
   onWelcome: ((playerId: string) => void) | null = null;
   onPlayerJoined: PlayerEventHandler | null = null;
@@ -22,42 +24,70 @@ export class NetworkManager {
   // Reserved for future server reconciliation
   // private positionProvider: (() => { x: number; y: number; z: number } | null) | null = null;
 
-  constructor(url: string, apiBase: string, playerId: string, sessionId: string) {
+  constructor(url: string, apiBase: string, playerId: string, sessionId: string, authToken?: string | null) {
     this.url = url;
     this.apiBase = apiBase.replace(/\/$/, '');
     this.playerId = playerId;
     this.sessionId = sessionId;
+    this.authToken = authToken || null;
   }
 
   connect() {
-    this.ws = new WebSocket(this.url);
+    const wsUrl = this.authToken ? `${this.url}${this.url.includes('?') ? '&' : '?'}token=${encodeURIComponent(this.authToken)}` : this.url;
+    this.ws = new WebSocket(wsUrl);
     this.ws.onopen = () => {
       this.safePost('/api/connection', { playerId: this.playerId, sessionId: this.sessionId, event: 'connected', timestamp: Date.now() });
-      this.send({ type: 'hello', playerId: this.playerId });
       this.startPing();
       this.startPresence();
     };
     this.ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === 'welcome' && msg.playerId && this.onWelcome) {
-          this.onWelcome(msg.playerId);
+        if (msg.type === 'welcome' && msg.playerId) {
+          this.onWelcome?.(msg.playerId);
+          // Seed existing snapshot (array of entities: {id,x,y,dir})
+          if (Array.isArray(msg.snapshot)) {
+            for (const ent of msg.snapshot) {
+              const id = ent.id;
+              if (!id) continue;
+              this.onPlayerJoined?.(id);
+              // Map server 2D (x,y) to client 3D (x,z), fixed y=1
+              this.onPlayerMoved?.(id, { x: Number(ent.x) || 0, y: 1, z: Number(ent.y) || 0 });
+            }
+          }
+          return;
         }
         if (msg.type === 'pong' && typeof msg.clientT === 'number') {
           const rtt = Date.now() - msg.clientT;
           this.recordLatency(rtt);
           return;
         }
-        if (msg.type === 'player_joined' && msg.playerId && this.onPlayerJoined) {
-          this.onPlayerJoined(msg.playerId);
+        if (msg.type === 'player_joined' && msg.playerId) {
+          this.onPlayerJoined?.(msg.playerId);
           return;
         }
-        if (msg.type === 'player_left' && msg.playerId && this.onPlayerLeft) {
-          this.onPlayerLeft(msg.playerId);
+        if (msg.type === 'player_left' && msg.playerId) {
+          this.onPlayerLeft?.(msg.playerId);
           return;
         }
-        if (msg.type === 'player_moved' && msg.playerId && msg.pos && this.onPlayerMoved) {
-          this.onPlayerMoved(msg.playerId, msg.pos);
+        if (msg.type === 'snapshot_delta') {
+          // apply add/update/remove
+          const add = Array.isArray(msg.add) ? msg.add : [];
+          const update = Array.isArray(msg.update) ? msg.update : [];
+          const remove = Array.isArray(msg.remove) ? msg.remove : [];
+          for (const ent of add) {
+            if (!ent?.id) continue;
+            this.onPlayerJoined?.(ent.id);
+            this.onPlayerMoved?.(ent.id, { x: Number(ent.x) || 0, y: 1, z: Number(ent.y) || 0 });
+          }
+          for (const ent of update) {
+            if (!ent?.id) continue;
+            this.onPlayerMoved?.(ent.id, { x: Number(ent.x) || 0, y: 1, z: Number(ent.y) || 0 });
+          }
+          for (const id of remove) {
+            if (typeof id !== 'string') continue;
+            this.onPlayerLeft?.(id);
+          }
           return;
         }
         if (msg.type === 'chat' && msg.from && typeof msg.text === 'string') {
@@ -115,11 +145,13 @@ export class NetworkManager {
   }
 
   sendMove(pos: { x: number; y: number; z: number }) {
-    this.send({ type: 'move', pos });
+    // Server expects 2D x,y (map y=z) and supports seq for reconciliation
+    const seq = ++this.seqCounter;
+    this.send({ type: 'move', x: pos.x, y: pos.z, seq });
   }
 
   sendChat(text: string) {
-    this.send({ type: 'chat', text });
+    this.send({ type: 'chat', text: String(text || '').slice(0, 256) });
   }
 
   // setPositionProvider(getter: () => { x: number; y: number; z: number } | null) {

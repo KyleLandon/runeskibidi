@@ -13,6 +13,18 @@ const { setupWebSocketServer, getWebSocketStats } = require('./ws');
 const { World } = require('./simulation/world');
 const { upsertPresence, savePosition } = require('./db/playerRepo');
 
+// Helper to coerce timestamps safely
+function coerceTimestamp(ts) {
+  if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+  if (typeof ts === 'string') {
+    const n = Number(ts);
+    if (Number.isFinite(n)) return n;
+    const p = Date.parse(ts);
+    if (Number.isFinite(p)) return p;
+  }
+  return Date.now();
+}
+
 // Trust proxy when behind a load balancer (e.g., Render/Heroku/Nginx)
 app.set('trust proxy', 1);
 
@@ -37,34 +49,36 @@ let activePlayers = new Map(); // playerId -> { playerId, sessionId, connectedAt
 
 // Endpoint for client to report connection events
 app.post('/api/connection', (req, res) => {
-  const { playerId, sessionId, event, timestamp } = req.body;
-  connections.push({ playerId, sessionId, event, timestamp });
+  const { playerId, sessionId, event, timestamp } = req.body || {};
+  const ts = coerceTimestamp(timestamp);
+  connections.push({ playerId, sessionId, event, timestamp: ts });
   
   if (event === 'connected') {
     activePlayers.set(playerId, { 
       playerId, 
       sessionId, 
-      connectedAt: new Date(timestamp),
-      lastSeen: new Date(timestamp)
+      connectedAt: new Date(ts),
+      lastSeen: new Date(ts)
     });
   } else if (event === 'disconnected') {
     activePlayers.delete(playerId);
   } else if (event === 'presence') {
     const rec = activePlayers.get(playerId);
     if (rec) {
-      rec.lastSeen = new Date(timestamp);
+      rec.lastSeen = new Date(ts);
       activePlayers.set(playerId, rec);
     }
   }
   
-  logs.push(`[${new Date(timestamp).toISOString()}] ${event} - Player: ${playerId}, Session: ${sessionId}`);
+  logs.push(`[${new Date(ts).toISOString()}] ${event} - Player: ${playerId}, Session: ${sessionId}`);
   res.json({ status: 'ok' });
 });
 
 // Endpoint for client to report errors
 app.post('/api/error', (req, res) => {
-  const { playerId, sessionId, error, timestamp } = req.body;
-  logs.push(`[${new Date(timestamp).toISOString()}] ERROR - Player: ${playerId}, Session: ${sessionId}, Error: ${error}`);
+  const { playerId, sessionId, error, timestamp } = req.body || {};
+  const ts = coerceTimestamp(timestamp);
+  logs.push(`[${new Date(ts).toISOString()}] ERROR - Player: ${playerId}, Session: ${sessionId}, Error: ${error}`);
   res.json({ status: 'ok' });
 });
 
@@ -416,12 +430,12 @@ app.get('/admin', (req, res) => {
                     }
                     
                     playerList.innerHTML = players.map(player => \`
-                        <div class="player-item">
-                            <div class="player-name">\${player.playerId}</div>
-                            <div class="player-info">
-                                Session: \${player.sessionId}<br>
-                                Connected: \${new Date(player.connectedAt).toLocaleString()}<br>
-                                Last Seen: \${new Date(player.lastSeen).toLocaleString()}
+                        <div class=\"player-item\">
+                            <div class=\"player-name\">\\${player.playerId}</div>
+                            <div class=\"player-info\">
+                                Session: \\${player.sessionId}<br>
+                                Connected: \\${new Date(player.connectedAt).toLocaleString()}<br>
+                                Last Seen: \\${new Date(player.lastSeen).toLocaleString()}
                             </div>
                         </div>
                     \`).join('');
@@ -450,7 +464,7 @@ app.get('/admin', (req, res) => {
                     logList.innerHTML = logs.map(log => {
                         const isError = log.includes('ERROR');
                         const isInfo = log.includes('connected') || log.includes('disconnected');
-                        return \`<div class="log-entry \${isError ? 'error' : isInfo ? 'info' : ''}">\${log}</div>\`;
+                        return \`<div class=\"log-entry \\${isError ? 'error' : isInfo ? 'info' : ''}\">\\${log}</div>\`;
                     }).join('');
                     
                     // Auto-scroll to bottom
@@ -480,7 +494,7 @@ app.get('/admin', (req, res) => {
             function toggleAutoRefresh() {
                 autoRefresh = !autoRefresh;
                 const indicator = document.getElementById('autoRefresh');
-                indicator.textContent = \`Auto-refresh: \${autoRefresh ? 'ON' : 'OFF'}\`;
+                indicator.textContent = \`Auto-refresh: \\${autoRefresh ? 'ON' : 'OFF'}\`;
                 
                 if (autoRefresh) {
                     refreshInterval = setInterval(() => {
@@ -538,13 +552,17 @@ setupWebSocketServer(server, world, {
   onPlayerConnect: ({ playerId, sessionId, timestamp }) => {
     connections.push({ playerId, sessionId, event: 'connected', timestamp });
     activePlayers.set(playerId, { playerId, sessionId, connectedAt: new Date(timestamp), lastSeen: new Date(timestamp) });
-    logs.push(`[${new Date(timestamp).toISOString()}] connected - Player: ${playerId}, Session: ${sessionId}`);
+    const line = `[${new Date(timestamp).toISOString()}] connected - Player: ${playerId}, Session: ${sessionId}`;
+    logs.push(line);
+    console.log(line);
     upsertPresence({ playerId, sessionId, status: 'online' });
   },
   onPlayerDisconnect: ({ playerId, sessionId, timestamp }) => {
     connections.push({ playerId, sessionId, event: 'disconnected', timestamp });
     activePlayers.delete(playerId);
-    logs.push(`[${new Date(timestamp).toISOString()}] disconnected - Player: ${playerId}, Session: ${sessionId}`);
+    const line = `[${new Date(timestamp).toISOString()}] disconnected - Player: ${playerId}, Session: ${sessionId}`;
+    logs.push(line);
+    console.log(line);
     upsertPresence({ playerId, sessionId, status: 'offline' });
   }
 });

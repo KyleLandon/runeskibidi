@@ -135,6 +135,7 @@ function setupWebSocketServer(server, world, options = {}) {
     world.addPlayer(playerId);
     safeSend(ws, JSON.stringify({ type: 'welcome', playerId, snapshot: world.getSnapshotFor(playerId) }));
     world.broadcastExcept(playerId, { type: 'player_joined', playerId });
+    console.log(`[${new Date().toISOString()}] ws_connected player=${playerId} ip=${ip}`);
 
     // Notify admin tracking if provided
     if (typeof options.onPlayerConnect === 'function') {
@@ -191,6 +192,7 @@ function setupWebSocketServer(server, world, options = {}) {
       clients.delete(playerId);
       world.removePlayer(playerId);
       world.broadcast({ type: 'player_left', playerId });
+      console.log(`[${new Date().toISOString()}] ws_disconnected player=${playerId} ip=${ip}`);
       if (typeof options.onPlayerDisconnect === 'function') {
         try { options.onPlayerDisconnect({ playerId, sessionId, timestamp: Date.now() }); } catch {}
       }

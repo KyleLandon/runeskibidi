@@ -141,8 +141,10 @@ class GameApp {
       const apiBase = (import.meta.env.VITE_API_BASE as string) || `${location.protocol}//${location.hostname}:${import.meta.env.VITE_SERVER_PORT || '4000'}`;
       const playerId = await this.authManager.getCurrentUserId();
       const sessionId = character.id;
+      const session = await this.authManager.getSession();
+      const token: string | null = session?.access_token || null;
       if (playerId) {
-        this.network = new NetworkManager(wsUrl, apiBase, playerId, sessionId);
+        this.network = new NetworkManager(wsUrl, apiBase, playerId, sessionId, token);
         this.network.onLatency = (ms) => {
           this.hud?.updateLatency(ms);
           this.osrsHud?.updateLatency(ms);

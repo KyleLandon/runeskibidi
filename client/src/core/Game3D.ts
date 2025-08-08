@@ -13,7 +13,7 @@ export class Game3D {
   private targetPosition: THREE.Vector3 | null = null;
   private network: any | null = null;
   private otherPlayers: Map<string, THREE.Mesh> = new Map();
-  private renderOtherPlayers = false; // toggle rendering of remote players
+  private renderOtherPlayers = true; // show remote players by default
 
   // Orbit camera state (OSRS-style)
   private camYaw = 0; // radians
@@ -196,27 +196,6 @@ export class Game3D {
             this.flashObject(firstNonGround.object as THREE.Object3D);
             const label = (firstNonGround.object as THREE.Object3D).name || 'Target';
             window.dispatchEvent(new CustomEvent('game-action', { detail: { type: 'interact', text: `Interacting with ${label}` } }));
-            // Grant some XP for demo when interacting with rock or NPC
-            const kind = this.classifyTarget(firstNonGround.object as THREE.Object3D);
-            try {
-              const { SkillManager } = await import('../managers/SkillManager');
-              const sm = SkillManager.getInstance();
-              if (kind === 'object') {
-                const objName = (firstNonGround.object as THREE.Object3D).name.toLowerCase();
-                const type = objName.includes('rock') ? 'rock' : objName.includes('crystal') ? 'crystal' : objName.includes('tree') ? 'tree' : 'rock';
-                const can = sm.canGather('mining', type);
-                if (can.canGather) {
-                  const xp = sm.calculateXPGain('mining', type);
-                  sm.addXP('mining', xp);
-                  window.dispatchEvent(new CustomEvent('game-action', { detail: { type: 'gather', text: `Gained ${xp} Mining XP` } }));
-                } else {
-                  window.dispatchEvent(new CustomEvent('game-action', { detail: { type: 'gather', text: `Requires Mining ${can.levelRequired}` } }));
-                }
-              } else if (kind === 'npc') {
-                sm.addXP('attack', 20);
-                window.dispatchEvent(new CustomEvent('game-action', { detail: { type: 'combat', text: `Practiced combat: +20 Attack XP` } }));
-              }
-            } catch {}
           } else if (groundHit) {
             const p = groundHit.point.clone();
             p.y = 1;
