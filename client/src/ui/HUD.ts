@@ -48,6 +48,9 @@ export class HUD {
         <div class="fps-display">FPS: <span id="fps">--</span></div>
         <div class="gpu-info">GPU: Optimized</div>
       </div>
+      <div class="hud-buttons">
+        <button id="btn-toggle-inventory" title="Toggle Inventory (Tab)">Inventory</button>
+      </div>
       <div class="controls-help">
         <div>WASD / Arrows: Move</div>
         <div>Left Click: Move to location</div>
@@ -61,6 +64,15 @@ export class HUD {
     this.el.appendChild(this.actionsPanel);
     
     document.body.appendChild(this.el);
+
+    // Bind HUD button once mounted
+    setTimeout(() => {
+      const btn = document.getElementById('btn-toggle-inventory');
+      btn?.addEventListener('click', () => {
+        const event = new CustomEvent('toggle-inventory');
+        window.dispatchEvent(event);
+      });
+    });
   }
 
   updateHealth(current: number, max: number) {
@@ -110,7 +122,7 @@ export class HUD {
     this.el.style.display = 'block';
   }
 
-  updatePerformanceStats(fps: number, memoryMB: number) {
+  updatePerformanceStats(fps: number, _memoryMB: number) {
     const fpsElement = document.getElementById('fps');
     if (fpsElement) {
       fpsElement.textContent = fps.toFixed(1);

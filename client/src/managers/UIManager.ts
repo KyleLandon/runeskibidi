@@ -3,6 +3,7 @@ import { StatsPanel } from '../ui/StatsPanel';
 import { EquipmentPanel } from '../ui/EquipmentPanel';
 import { InventoryPanel } from '../ui/InventoryPanel';
 import { SkillsPanel } from '../ui/SkillsPanel';
+import { Hotbar } from '../ui/Hotbar';
 
 export class UIManager {
   panel: HTMLDivElement;
@@ -12,6 +13,7 @@ export class UIManager {
   equipmentPanel: EquipmentPanel;
   inventoryPanel: InventoryPanel;
   skillsPanel: SkillsPanel;
+  hotbar: Hotbar;
   player: any;
 
   constructor(player: any) {
@@ -25,11 +27,13 @@ export class UIManager {
     this.equipmentPanel = new EquipmentPanel();
     this.inventoryPanel = new InventoryPanel();
     this.skillsPanel = new SkillsPanel();
+    this.hotbar = new Hotbar();
 
     this.panel.appendChild(this.statsPanel.el);
     this.panel.appendChild(this.equipmentPanel.el);
     this.panel.appendChild(this.inventoryPanel.el);
     this.panel.appendChild(this.skillsPanel.el);
+    document.body.appendChild(this.hotbar.el);
     document.body.appendChild(this.panel);
     
     // Initial render
@@ -90,12 +94,12 @@ export class UIManager {
       // Drag-and-drop support (from equipment)
       slotEl.setAttribute('draggable', 'true');
       slotEl.addEventListener('dragstart', (e) => {
-        e.dataTransfer?.setData('text/plain', JSON.stringify({ from: 'equipment', slot }));
+        (e as DragEvent).dataTransfer?.setData('text/plain', JSON.stringify({ from: 'equipment', slot }));
       });
       slotEl.addEventListener('dragover', (e) => e.preventDefault());
       slotEl.addEventListener('drop', (e) => {
         e.preventDefault();
-        const data = JSON.parse(e.dataTransfer?.getData('text/plain') || '{}');
+        const data = JSON.parse((e as DragEvent).dataTransfer?.getData('text/plain') || '{}');
         if (data.from === 'inventory') {
           const item = this.player.inventory[data.index];
           if (item && this.canEquip(item, slot)) {
@@ -136,12 +140,12 @@ export class UIManager {
       // Drag-and-drop support (from inventory)
       slot.setAttribute('draggable', 'true');
       slot.addEventListener('dragstart', (e) => {
-        e.dataTransfer?.setData('text/plain', JSON.stringify({ from: 'inventory', index: i }));
+        (e as DragEvent).dataTransfer?.setData('text/plain', JSON.stringify({ from: 'inventory', index: i }));
       });
       slot.addEventListener('dragover', (e) => e.preventDefault());
       slot.addEventListener('drop', (e) => {
         e.preventDefault();
-        const data = JSON.parse(e.dataTransfer?.getData('text/plain') || '{}');
+        const data = JSON.parse((e as DragEvent).dataTransfer?.getData('text/plain') || '{}');
         if (data.from === 'inventory' && data.index !== i) {
           // Swap inventory slots
           const tmp = this.player.inventory[i];

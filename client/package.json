@@ -9,11 +9,14 @@
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@types/three": "^0.179.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.51.0",
-    "pixi.js": "^8.11.0"
+    "helmet": "^8.1.0",
+    "morgan": "^1.10.1",
+    "three": "^0.179.1"
   }
 }

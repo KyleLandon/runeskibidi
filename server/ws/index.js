@@ -4,9 +4,13 @@ const WebSocket = require('ws');
 function setupWebSocketServer(server) {
   const wss = new WebSocket.Server({ server });
   const clients = new Map(); // Map of playerId -> ws
+  const heartbeats = new WeakMap();
 
   wss.on('connection', (ws, req) => {
     let playerId = null;
+    ws.isAlive = true;
+    heartbeats.set(ws, Date.now());
+    ws.on('pong', () => { ws.isAlive = true; heartbeats.set(ws, Date.now()); });
     ws.on('message', (msg) => {
       try {
         const data = JSON.parse(msg);
@@ -31,6 +35,19 @@ function setupWebSocketServer(server) {
         broadcast({ type: 'player_left', playerId });
       }
     });
+  });
+
+  // Heartbeat interval
+  const interval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      if (ws.isAlive === false) return ws.terminate();
+      ws.isAlive = false;
+      ws.ping();
+    });
+  }, 30000);
+
+  wss.on('close', () => {
+    clearInterval(interval);
   });
 
   function broadcast(msg) {

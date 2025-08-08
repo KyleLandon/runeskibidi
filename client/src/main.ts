@@ -3,13 +3,14 @@ import './styles/style.css'
 import { AuthManager } from './managers/AuthManager';
 import { AuthModal } from './components/AuthModal';
 import { CharacterSelectModal, type CharacterCreateOptions } from './components/CharacterSelectModal';
-import { Game } from './core/Game';
+import { Game3D } from './core/Game3D';
 import { UIManager } from './managers/UIManager';
+import { PlayerData } from './core/PlayerData';
 
 class GameApp {
   private authManager: AuthManager;
   private authModal: AuthModal;
-  private game: Game | null = null;
+  private playerData: PlayerData | null = null;
   private uiManager: UIManager | null = null;
 
   constructor() {
@@ -181,8 +182,8 @@ class GameApp {
               animation: spin 1s linear infinite;
               margin: 20px auto;
             "></div>
-          </div>
-        </div>
+    </div>
+  </div>
         <style>
           @keyframes spin {
             from { transform: rotate(0deg); }
@@ -196,21 +197,39 @@ class GameApp {
 
       // Clear loading screen and initialize game
       container.innerHTML = '';
-
-      // Initialize PIXI.js game
-      this.game = await Game.create(container);
       
-      // Set up player with character data
-      this.game.initializePlayer(character);
+      // Always launch Three.js 3D
+      await Game3D.create(container);
+      // Create player data for UI
+      this.playerData = new PlayerData();
+      this.playerData.initializeFromCharacter(character);
 
       // Initialize UI Manager
-      this.uiManager = new UIManager(this.game.player);
-      
-      // Set up keyboard controls
-      this.setupControls();
+      this.uiManager = new UIManager(this.playerData);
+
+      // Bind HUD inventory toggle
+      window.addEventListener('toggle-inventory', () => {
+        if (this.uiManager) this.uiManager.toggle();
+      });
+
+      // Hotbar keybinds (QWER1234) -> stub
+      document.addEventListener('keydown', (e) => {
+        if (!this.uiManager) return;
+        const map: Record<string, number> = {
+          q: 0, w: 1, e: 2, r: 3, '1': 4, '2': 5, '3': 6, '4': 7,
+          Q: 0, W: 1, E: 2, R: 3
+        };
+        const idx = map[e.key];
+        if (idx !== undefined) {
+          // @ts-ignore: hotbar is exposed on UIManager
+          this.uiManager.hotbar.activate(idx);
+        }
+      });
 
       // Update UI with initial data
-      this.updateUI();
+      if (this.uiManager && this.playerData) {
+        this.updateUI();
+      }
 
       console.log('Game initialized successfully with character:', character.name);
       
@@ -221,48 +240,15 @@ class GameApp {
   }
 
   setupControls() {
-    // Set up keyboard event listeners
-    document.addEventListener('keydown', (e) => {
-      if (this.game) {
-        this.game.setKeyState(e.key, true);
-      }
-      
-      // UI toggle with Tab key
-      if (e.key === 'Tab' && this.game?.uiManager) {
-        e.preventDefault();
-        this.game.uiManager.toggle();
-      }
-      
-      // Zoom controls
-      if (this.game && (e.key === '=' || e.key === '+')) {
-        e.preventDefault();
-        this.game.adjustZoom(1); // Zoom in
-      }
-      if (this.game && (e.key === '-' || e.key === '_')) {
-        e.preventDefault();
-        this.game.adjustZoom(-1); // Zoom out
-      }
-    });
-
-    document.addEventListener('keyup', (e) => {
-      if (this.game) {
-        this.game.setKeyState(e.key, false);
-      }
-    });
-
-    console.log('Controls initialized:');
-    console.log('- WASD or arrow keys to move');
-    console.log('- Left click to move to location');
-    console.log('- Right click on trees/rocks to interact');
-    console.log('- Tab to toggle UI');
-    console.log('- Mouse wheel or +/- keys to zoom');
+    // 3D controls handled in engine prototype for now
+    // Keep only UI-level bindings in initGame()
   }
 
   updateUI() {
-    if (!this.uiManager || !this.game) return;
+    if (!this.uiManager || !this.playerData) return;
     
     // Update stats panel
-    const attributes = this.game.player.getTotalAttributes();
+    const attributes = this.playerData.getTotalAttributes();
     const stats = [
       { name: 'Strength', value: attributes.total.strength },
       { name: 'Dexterity', value: attributes.total.dexterity },
@@ -273,8 +259,8 @@ class GameApp {
     ];
     
     this.uiManager.renderStats(stats);
-    this.uiManager.renderEquipment(this.game.player.equipment);
-    this.uiManager.renderInventory(this.game.player.inventory);
+    this.uiManager.renderEquipment(this.playerData.equipment);
+    this.uiManager.renderInventory(this.playerData.inventory);
   }
 
   showError(message: string) {

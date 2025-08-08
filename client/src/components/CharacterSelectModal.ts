@@ -1,5 +1,4 @@
 import './CharacterSelectModal.css';
-import { AssetManager } from '../managers/AssetManager';
 
 export type Character = { 
   id: string; 
@@ -45,7 +44,7 @@ export class CharacterSelectModal {
     character: null,
     confirmText: ''
   };
-  assetManager: AssetManager;
+  
   createOpts: CharacterCreateOptions = {
     name: '',
     is_hardcore: false,
@@ -75,7 +74,6 @@ export class CharacterSelectModal {
     this.onSelect = onSelect;
     this.onCreate = onCreate;
     this.onDelete = onDelete;
-    this.assetManager = AssetManager.getInstance();
     this.el = document.createElement('div');
     this.el.className = 'char-modal-overlay';
     this.el.innerHTML = this.render();
@@ -593,15 +591,11 @@ export class CharacterSelectModal {
 
   show() {
     this.el.style.display = 'flex';
-    // Play login music during character selection
-    this.assetManager.loadAllAssets().then(() => {
-      this.assetManager.playMusic('login', true);
-    });
+    // (3D) Music system will be added later
   }
 
   hide() {
     this.el.style.display = 'none';
-    // Stop login music when character selection is hidden
-    this.assetManager.stopAllMusic();
+    // (3D) Stop audio when integrated
   }
 } 

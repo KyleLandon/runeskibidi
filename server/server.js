@@ -1,13 +1,17 @@
 // server.js
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
 const app = express();
 const PORT = process.env.PORT || 4000;
 const http = require('http');
 const { setupWebSocketServer } = require('./ws');
 
 app.use(cors());
-app.use(express.json());
+app.use(helmet());
+app.use(express.json({ limit: '256kb' }));
+app.use(morgan('tiny'));
 
 // In-memory store for demo (replace with DB or Supabase integration as needed)
 let connections = [];
