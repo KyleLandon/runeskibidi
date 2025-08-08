@@ -1,4 +1,5 @@
 // server.js
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -9,6 +10,8 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 const http = require('http');
 const { setupWebSocketServer } = require('./ws');
+const { World } = require('./simulation/world');
+const { upsertPresence, savePosition } = require('./db/playerRepo');
 
 // Trust proxy when behind a load balancer (e.g., Render/Heroku/Nginx)
 app.set('trust proxy', 1);
@@ -27,7 +30,7 @@ app.use(cors(allowedOrigin ? { origin: allowedOrigin, credentials: true } : {}))
 const limiter = rateLimit({ windowMs: 60 * 1000, max: 200 });
 app.use('/api', limiter);
 
-// In-memory store for demo (replace with DB or Supabase integration as needed)
+// In-memory store for admin panel
 let connections = [];
 let logs = [];
 let activePlayers = new Map(); // playerId -> { playerId, sessionId, connectedAt, lastSeen }
@@ -454,9 +457,37 @@ server.on('connection', (socket) => socket.setNoDelay(true));
 // Tune HTTP timeouts for keep-alive
 server.keepAliveTimeout = 60_000; // 60s
 server.headersTimeout = 65_000; // keepAliveTimeout + buffer
-setupWebSocketServer(server);
+// Create world simulation and attach to WS
+const world = new World({ tickRate: Number(process.env.TICK_RATE || 20) });
+setupWebSocketServer(server, world, {
+  requireAuth: process.env.REQUIRE_AUTH === 'true',
+  supabaseUrl: process.env.SUPABASE_URL,
+  supabaseServiceKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  onPlayerConnect: ({ playerId, sessionId, timestamp }) => {
+    connections.push({ playerId, sessionId, event: 'connected', timestamp });
+    activePlayers.set(playerId, { playerId, sessionId, connectedAt: new Date(timestamp), lastSeen: new Date(timestamp) });
+    logs.push(`[${new Date(timestamp).toISOString()}] connected - Player: ${playerId}, Session: ${sessionId}`);
+    upsertPresence({ playerId, sessionId, status: 'online' });
+  },
+  onPlayerDisconnect: ({ playerId, sessionId, timestamp }) => {
+    connections.push({ playerId, sessionId, event: 'disconnected', timestamp });
+    activePlayers.delete(playerId);
+    logs.push(`[${new Date(timestamp).toISOString()}] disconnected - Player: ${playerId}, Session: ${sessionId}`);
+    upsertPresence({ playerId, sessionId, status: 'offline' });
+  }
+});
 
-// TODO: Add game tick/loop logic here for authoritative world state
+// Start the authoritative world loop
+world.start();
+
+// Periodic persistence of positions (best-effort)
+setInterval(() => {
+  try {
+    for (const [playerId, s] of world.players.entries()) {
+      savePosition({ playerId, x: s.x, y: s.y });
+    }
+  } catch {}
+}, 5000);
 
 server.listen(PORT, () => {
   console.log(`Admin server and WebSocket running on http://localhost:${PORT}/admin`);

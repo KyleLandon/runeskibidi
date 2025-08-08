@@ -1,8 +1,9 @@
 // server/ws/index.js
 const WebSocket = require('ws');
 const os = require('os');
+const { createClient } = require('@supabase/supabase-js');
 
-function setupWebSocketServer(server) {
+function setupWebSocketServer(server, world, options = {}) {
   const wss = new WebSocket.Server({ server, perMessageDeflate: {
     zlibDeflateOptions: { level: 3 },
     zlibInflateOptions: { chunkSize: 16 * 1024 },
@@ -11,60 +12,98 @@ function setupWebSocketServer(server) {
     concurrencyLimit: os.cpus()?.length || 4,
     threshold: 1024
   }});
-  const clients = new Map(); // Map of playerId -> ws
-  const heartbeats = new WeakMap();
 
-  wss.on('connection', (ws, req) => {
-    let playerId = null;
+  const jwtRequired = !!options.requireAuth;
+  const supabase = (options.supabaseUrl && options.supabaseServiceKey)
+    ? createClient(options.supabaseUrl, options.supabaseServiceKey)
+    : null;
+
+  const clients = new Map(); // playerId -> ws
+
+  // Validate auth header if required
+  async function validateAuth(req) {
+    if (!jwtRequired) return { ok: true, playerId: req.headers['x-player-id'] || null };
+    try {
+      const token = (req.url && new URL(req.url, 'ws://localhost').searchParams.get('token'))
+        || req.headers['sec-websocket-protocol']
+        || req.headers['authorization']?.replace('Bearer ', '')
+        || null;
+      if (!token || !supabase) return { ok: false, error: 'missing_token' };
+      const { data, error } = await supabase.auth.getUser(token);
+      if (error || !data?.user?.id) return { ok: false, error: 'invalid_token' };
+      return { ok: true, playerId: data.user.id };
+    } catch {
+      return { ok: false, error: 'auth_error' };
+    }
+  }
+
+  wss.on('connection', async (ws, req) => {
+    const auth = await validateAuth(req);
+    if (!auth.ok) {
+      ws.close(4401, 'unauthorized');
+      return;
+    }
+    const playerId = auth.playerId || req.headers['x-player-id'] || `guest:${Math.random().toString(36).slice(2,8)}`;
+    const sessionId = Math.random().toString(36).slice(2,10);
+
     ws.isAlive = true;
-    heartbeats.set(ws, Date.now());
-    ws.on('pong', () => { ws.isAlive = true; heartbeats.set(ws, Date.now()); });
-    // Parse JSON safely
+    ws.on('pong', () => { ws.isAlive = true; });
+
+    clients.set(playerId, ws);
+    // Add to world on connect
+    world.addPlayer(playerId);
+    ws.send(JSON.stringify({ type: 'welcome', playerId, snapshot: world.getSnapshotFor(playerId) }));
+    world.broadcastExcept(playerId, { type: 'player_joined', playerId });
+
+    // Notify admin tracking if provided
+    if (typeof options.onPlayerConnect === 'function') {
+      try { options.onPlayerConnect({ playerId, sessionId, timestamp: Date.now() }); } catch {}
+    }
+
+    // Per-connection simple rate limit (inputs/sec)
+    let lastSecond = Math.floor(Date.now() / 1000);
+    let counter = 0;
+
     ws.on('message', (msg) => {
-      try {
-        const data = JSON.parse(msg.toString());
-        if (data.type === 'hello') {
-          playerId = data.playerId;
-          clients.set(playerId, ws);
-          ws.send(JSON.stringify({ type: 'welcome', playerId }));
-          // Notify others only
-          const payload = JSON.stringify({ type: 'player_joined', playerId });
-          for (const [pid, client] of clients.entries()) {
-            if (client !== ws && client.readyState === WebSocket.OPEN) {
-              client.send(payload);
-            }
-          }
-        } else if (data.type === 'move') {
-          // Broadcast movement to all other clients
-          const payload = { type: 'player_moved', playerId, pos: data.pos };
-          const str = JSON.stringify(payload);
-          wss.clients.forEach((client) => {
-            if (client !== ws && client.readyState === WebSocket.OPEN) {
-              client.send(str);
-            }
-          });
-        } else if (data.type === 'ping') {
-          // Echo back client timestamp so client can compute RTT
+      let data;
+      try { data = JSON.parse(msg.toString()); } catch { return; }
+      if (!data || typeof data !== 'object') return;
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (nowSec !== lastSecond) { lastSecond = nowSec; counter = 0; }
+      counter++;
+      if (counter > 30) { // basic global input cap per client
+        return; // drop silently
+      }
+
+      switch (data.type) {
+        case 'ping': {
           ws.send(JSON.stringify({ type: 'pong', clientT: data.t, serverT: Date.now() }));
-        } else if (data.type === 'chat' && typeof data.text === 'string') {
-          const payload = { type: 'chat', from: playerId || 'unknown', text: String(data.text).slice(0, 256), t: Date.now() };
-          const str = JSON.stringify(payload);
-          wss.clients.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) client.send(str);
-          });
+          return;
         }
-        // Add more message types as needed
-      } catch (e) {
-        ws.send(JSON.stringify({ type: 'error', error: e.message }));
+        case 'move': {
+          world.queueInput({ playerId, kind: 'move', payload: data });
+          return;
+        }
+        case 'cast': {
+          world.queueInput({ playerId, kind: 'cast', payload: data });
+          return;
+        }
+        case 'chat': {
+          world.broadcast({ type: 'chat', from: playerId, text: String(data.text || '').slice(0,256), t: Date.now() });
+          return;
+        }
+        default:
+          return;
       }
     });
+
     ws.on('close', () => {
-      if (playerId) {
-        clients.delete(playerId);
-        const payload = JSON.stringify({ type: 'player_left', playerId });
-        for (const [pid, client] of clients.entries()) {
-          if (client.readyState === WebSocket.OPEN) client.send(payload);
-        }
+      clients.delete(playerId);
+      world.removePlayer(playerId);
+      world.broadcast({ type: 'player_left', playerId });
+      if (typeof options.onPlayerDisconnect === 'function') {
+        try { options.onPlayerDisconnect({ playerId, sessionId, timestamp: Date.now() }); } catch {}
       }
     });
   });
@@ -78,20 +117,31 @@ function setupWebSocketServer(server) {
     });
   }, 30000);
 
-  wss.on('close', () => {
-    clearInterval(interval);
+  wss.on('close', () => clearInterval(interval));
+
+  // Wire world outbound sends to actual sockets
+  world.onSend((playerId, msg) => {
+    const ws = clients.get(playerId);
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try { ws.send(JSON.stringify(msg)); } catch { /* ignore */ }
   });
 
-  function broadcast(msg) {
+  world.onBroadcast((msg) => {
     const str = JSON.stringify(msg);
-    for (const ws of clients.values()) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(str);
-      }
+    for (const ws of wss.clients) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(str);
     }
-  }
+  });
+
+  world.onBroadcastExcept((excludeId, msg) => {
+    const str = JSON.stringify(msg);
+    for (const [pid, ws] of clients.entries()) {
+      if (pid === excludeId) continue;
+      if (ws.readyState === WebSocket.OPEN) ws.send(str);
+    }
+  });
 
   return wss;
 }
 
-module.exports = { setupWebSocketServer }; 
+module.exports = { setupWebSocketServer };
